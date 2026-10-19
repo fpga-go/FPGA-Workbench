@@ -1,10 +1,10 @@
-# FPGA Workbench 0.1.0 发布版检查
+# FPGA Workbench 0.1.1 预发布版检查
 
 本记录对应作者为 `fpga-go`、扩展标识为 `fpga-go.fpga-workbench` 的发布副本。
 
 ## 本次验证
 
-Windows x64 上运行 `npm test`：41 项通过，0 项失败、0 项跳过。运行 `npm run build` 和 `npm run package` 构建插件及 VSIX。
+Windows x64 上运行 `npm test`：41 项通过，0 项失败、0 项跳过。运行 `npm run build` 和 `npm run package -- --pre-release` 构建插件及 VSIX。当前版本来自 `feature`，作为预发布版供试用，尚未合并到 `develop`；`main` 暂不发布。
 
 自动化检查覆盖 XPR 路径变量与文件集、缺失和禁用条目、IP 声明选择、相对 filelist、模块与信号定位、端口连接两侧定位、作用域、条件分支过滤、Windows 路径规范化、JSON-RPC 通信和中文编码。语义检查实际启动随包 slang-server，并验证模块、端口、信号及层级返回位置。测试使用代码内的合成输入或测试时生成的临时文件。
 

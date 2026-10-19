@@ -17,6 +17,8 @@
 
 源码仓库：[fpga-go/FPGA-Workbench](https://github.com/fpga-go/FPGA-Workbench)。`package.json` 已填写对应的 repository、homepage 和 bugs 地址。
 
+发布前先核对[分支与版本维护规范](docs/RELEASING.md)。`main` 暂不发布；`feature` 测试版必须标记为 Pre-release，并同时上传对应版本的 `.vsix` 和 SHA256 校验文件。GitHub 自动生成的源码归档不能替代安装包。合并到 `develop` 必须等待用户明确通知。
+
 ## 建立独立 Git 仓库
 
 在**本目录根目录**打开终端。若此目录还没有独立 Git 仓库，可执行：
@@ -51,6 +53,8 @@ npm test
 npm run build
 npm run package
 ```
+
+`feature` 测试版将最后一行改为 `npm run package -- --pre-release`。
 
 安装包生成在 `output/`。验证范围以 [VERIFICATION.md](VERIFICATION.md) 为准；生成 VSIX 本身不证明导航功能通过验证。
 
