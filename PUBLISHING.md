@@ -17,7 +17,7 @@
 
 源码仓库：[fpga-go/FPGA-Workbench](https://github.com/fpga-go/FPGA-Workbench)。`package.json` 已填写对应的 repository、homepage 和 bugs 地址。
 
-发布前先核对[分支与版本维护规范](docs/RELEASING.md)。`main` 暂不发布；`feature` 测试版必须标记为 Pre-release，并同时上传对应版本的 `.vsix` 和 SHA256 校验文件。GitHub 自动生成的源码归档不能替代安装包。合并到 `develop` 必须等待用户明确通知。
+发布前先核对[分支与版本维护规范](docs/RELEASING.md)。只有 `develop` 可以发布 Marketplace 正式版；`feature` 在 GitHub 和 Marketplace 均只能发布 Pre-release；`main` 暂不发布。GitHub Release 必须同时上传对应版本的 `.vsix` 和 SHA256 校验文件，自动生成的源码归档不能替代安装包。合并到 `develop` 须由用户在 GitHub 网页确认。
 
 ## 建立独立 Git 仓库
 
@@ -54,7 +54,7 @@ npm run build
 npm run package
 ```
 
-`feature` 测试版将最后一行改为 `npm run package -- --pre-release`。
+上述正式打包命令只允许在 `develop` 执行。`feature` 测试版将最后一行改为 `npm run package -- --pre-release`。脚本拒绝 feature 正式包、main 发布包、未知分支及分离 HEAD；不提供绕过选项。已发布的预发布版本不能用同版本号转为正式版。
 
 安装包生成在 `output/`。验证范围以 [VERIFICATION.md](VERIFICATION.md) 为准；生成 VSIX 本身不证明导航功能通过验证。
 
