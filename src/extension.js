@@ -19,6 +19,8 @@ class Workbench {
     this.texts = new Map();
     this.members = new Set();
     this.watchers = [];
+    this.revision = 0;
+    this.disposed = false;
     this.project = undefined;
     this.fileset = context.workspaceState.get('fileset');
     this.top = context.workspaceState.get('top');
@@ -54,20 +56,26 @@ class Workbench {
   }
   async selectProject(uri) {
     if (!uri) {
+      const revision = this.revision;
       const picked = await vscode.window.showOpenDialog({title:'选择 Vivado 工程',filters:{'Vivado 工程':['xpr']},canSelectMany:false});
-      if(!picked?.length) return;
+      if(!picked?.length || !this.isCurrent(revision)) return;
       uri = picked[0];
     }
     const xpr = typeof uri === 'string' ? uri : uri.fsPath;
     this.fileset = undefined; this.top = undefined;
-    await this.load(xpr);
+    const loading = this.load(xpr), revision = this.revision;
+    if(!await loading || !this.isCurrent(revision)) return;
     const folder = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(xpr)) || vscode.workspace.workspaceFolders?.[0];
-    await this.context.workspaceState.update('project', {absolutePath:xpr,workspaceUri:folder?.uri.toString(),relativePath:folder ? path.relative(folder.uri.fsPath,xpr) : undefined});
-    await this.context.workspaceState.update('fileset',undefined);
-    await this.context.workspaceState.update('top',undefined);
-    await vscode.commands.executeCommand('workbench.view.extension.fpgaWorkbench');
+    // Issue state writes together so a later close cannot be followed by an old write.
+    await Promise.all([
+      this.context.workspaceState.update('project', {absolutePath:xpr,workspaceUri:folder?.uri.toString(),relativePath:folder ? path.relative(folder.uri.fsPath,xpr) : undefined}),
+      this.context.workspaceState.update('fileset',undefined),
+      this.context.workspaceState.update('top',undefined),
+      vscode.commands.executeCommand('workbench.view.extension.fpgaWorkbench')
+    ]);
   }
   async restore() {
+    const revision = this.revision;
     const saved = this.context.workspaceState.get('project');
     if(!saved) return;
     const folder = vscode.workspace.workspaceFolders?.find(f=>f.uri.toString() === saved.workspaceUri) || vscode.workspace.workspaceFolders?.[0];
@@ -75,49 +83,90 @@ class Workbench {
     for(const p of candidates) {
       if(!p) continue;
       try {await fs.access(p);} catch {continue;}
+      if(!this.isCurrent(revision)) return;
       await this.load(p); return;
     }
+    if(!this.isCurrent(revision)) return;
     this.status.text = '$(warning) FPGA: 工程路径已失效';
     this.output.appendLine('保存的 XPR 不存在，请重新选择工程。');
   }
   async load(xpr) {
+    if(this.disposed) return false;
+    const revision = ++this.revision;
+    const current = () => this.isCurrent(revision);
+    const fileset = this.fileset, top = this.top, cfg = this.config();
     clearTimeout(this.refreshTimer);
+    clearTimeout(this.treeTimer);
     this.clearWatchers();
+    this.clearProjectView();
     this.loadTarget = xpr;
-    // Serialize project changes so an older slow load cannot replace a newer selection.
-    const operation = async () => vscode.window.withProgress({location:{viewId:'fpgaWorkbench.files'},title:'读取 FPGA 工程'},async()=> {
-      this.status.text = '$(sync~spin) FPGA: 建立索引';
-      const cfg = this.config();
-      const project = await loadProject(xpr,{fileset:this.fileset,includeSimulation:cfg.get('includeSimulation'),includeDirs:cfg.get('extraIncludeDirs'),defines:cfg.get('extraDefines')});
-      const index = new HdlIndex(); const texts = new Map();
-      for(const file of project.sourceFiles) {
-        try {
-          const opened = vscode.workspace.textDocuments.find(d=>d.uri.scheme === 'file' && key(d.uri.fsPath) === key(file));
-          const text = opened ? opened.getText() : await readSource(file,cfg.get('sourceEncoding','auto'));
-          index.update(file,text); texts.set(key(file),text);
-        } catch(err) {project.warnings.push(`${file}: ${err.message}`);}
-      }
-      await this.backend.stop();
-      this.clearWatchers();
-      const newMembers=new Set(project.sourceFiles.map(key));
-      for(const doc of vscode.workspace.textDocuments) {
-        if(doc.uri.scheme==='file' && newMembers.has(key(doc.uri.fsPath))) {
-          index.update(doc.uri.fsPath,doc.getText());texts.set(key(doc.uri.fsPath),doc.getText());
+    this.status.text = '$(sync~spin) FPGA: 建立索引';
+    void vscode.commands.executeCommand('setContext','fpgaWorkbench.hasProject',true);
+    // Serialize backend ownership; revision guards discard stale work after every await.
+    const operation = async () => {
+      if(!current()) return false;
+      return vscode.window.withProgress({location:{viewId:'fpgaWorkbench.files'},title:'读取 FPGA 工程'},async()=> {
+        await this.backend.stop();
+        if(!current()) return false;
+        const project = await loadProject(xpr,{fileset,includeSimulation:cfg.get('includeSimulation'),includeDirs:cfg.get('extraIncludeDirs'),defines:cfg.get('extraDefines')});
+        if(!current()) return false;
+        const index = new HdlIndex(); const texts = new Map();
+        for(const file of project.sourceFiles) {
+          try {
+            const opened = vscode.workspace.textDocuments.find(d=>d.uri.scheme === 'file' && key(d.uri.fsPath) === key(file));
+            const text = opened ? opened.getText() : await readSource(file,cfg.get('sourceEncoding','auto'));
+            if(!current()) return false;
+            index.update(file,text); texts.set(key(file),text);
+          } catch(err) {project.warnings.push(`${file}: ${err.message}`);}
         }
-      }
-      this.project = project; this.index = index; this.texts = texts;
-      this.members = new Set(project.sourceFiles.map(key));
-      await vscode.commands.executeCommand('setContext','fpgaWorkbench.loaded',true);
-      this.change.fire();
-      for(const warning of project.warnings) this.output.appendLine(warning);
-      try {await this.backend.start({context:this.context,project:{...project,top:this.top || project.top},output:this.output,onChange:()=>this.refreshStatus()});}
-      catch(err) {this.output.appendLine(`语义服务未就绪，使用结构索引：${err.message}`);}
-      if(cfg.get('watchFiles')) this.installWatchers();
-      this.refreshStatus();
-      this.output.appendLine(`${project.name}: ${project.sourceFiles.length} 个源文件，${index.modules().length} 个模块，${project.warnings.length} 条提示。`);
-    });
+        if(!current()) return false;
+        const newMembers=new Set(project.sourceFiles.map(key));
+        for(const doc of vscode.workspace.textDocuments) {
+          if(doc.uri.scheme==='file' && newMembers.has(key(doc.uri.fsPath))) {
+            index.update(doc.uri.fsPath,doc.getText());texts.set(key(doc.uri.fsPath),doc.getText());
+          }
+        }
+        this.project = project; this.index = index; this.texts = texts;
+        this.members = new Set(project.sourceFiles.map(key));
+        await vscode.commands.executeCommand('setContext','fpgaWorkbench.loaded',true);
+        if(!current()) return false;
+        this.change.fire();
+        for(const warning of project.warnings) this.output.appendLine(warning);
+        try {await this.backend.start({context:this.context,project:{...project,top:top || project.top},output:this.output,onChange:()=>{if(current())this.refreshStatus();}});}
+        catch(err) {if(current())this.output.appendLine(`语义服务未就绪，使用结构索引：${err.message}`);}
+        if(!current()) {await this.backend.stop();return false;}
+        if(cfg.get('watchFiles')) this.installWatchers();
+        this.refreshStatus();
+        this.output.appendLine(`${project.name}: ${project.sourceFiles.length} 个源文件，${index.modules().length} 个模块，${project.warnings.length} 条提示。`);
+        return true;
+      });
+    };
+    try {return await this.enqueue(operation) && current();}
+    catch(err) {if(!current())return false;this.status.text='$(warning) FPGA: 读取失败';throw err;}
+  }
+  isCurrent(revision) {return !this.disposed && revision === this.revision;}
+  enqueue(operation) {
     this.loading = (this.loading || Promise.resolve()).catch(()=>{}).then(operation);
-    try {await this.loading;} catch(err) {this.refreshStatus();throw err;}
+    return this.loading;
+  }
+  clearProjectView() {
+    this.project = undefined;this.loadTarget = undefined;
+    this.index = new HdlIndex();this.texts.clear();this.members.clear();
+    this.status.text = '$(circuit-board) FPGA: 选择工程';this.status.tooltip = undefined;
+    this.fileView.description = undefined;this.hierView.description = undefined;
+    void vscode.commands.executeCommand('setContext','fpgaWorkbench.loaded',false);
+    this.change.fire();
+  }
+  async closeProject() {
+    ++this.revision;
+    clearTimeout(this.refreshTimer);clearTimeout(this.treeTimer);this.clearWatchers();
+    this.fileset = undefined;this.top = undefined;
+    this.clearProjectView();
+    await Promise.all([
+      vscode.commands.executeCommand('setContext','fpgaWorkbench.hasProject',false),
+      ...['project','fileset','top'].map(name=>this.context.workspaceState.update(name,undefined)),
+      this.enqueue(()=>this.backend.stop())
+    ]);
   }
   refreshStatus() {
     if(!this.project) return;
@@ -132,9 +181,10 @@ class Workbench {
   async refresh() {if(this.loadTarget || this.project) await this.load(this.loadTarget || this.project.path); else await this.selectProject();}
   scheduleRefresh() {
     const target=this.loadTarget || this.project?.path;
+    const revision=this.revision;
     if(!target)return;
     clearTimeout(this.refreshTimer);
-    this.refreshTimer=setTimeout(()=>{if(target === this.loadTarget) this.load(target).catch(e=>this.report(e));},600);
+    this.refreshTimer=setTimeout(()=>{if(this.isCurrent(revision) && target === this.loadTarget) this.load(target).catch(e=>this.report(e));},600);
   }
   report(e) {this.output.appendLine(e.stack || String(e));vscode.window.showErrorMessage(`FPGA Workbench: ${e.message || e}`);}
   clearWatchers() {for(const w of this.watchers) w.dispose();this.watchers=[];}
@@ -161,8 +211,9 @@ class Workbench {
   }
   async closedDocument(doc) {
     if(doc.uri.scheme !== 'file' || !this.members.has(key(doc.uri.fsPath))) return;
-    try {const text=await readSource(doc.uri.fsPath,this.config().get('sourceEncoding','auto'));this.index.update(doc.uri.fsPath,text);this.texts.set(key(doc.uri.fsPath),text);this.change.fire();}
-    catch {this.index.remove(doc.uri.fsPath);this.texts.delete(key(doc.uri.fsPath));this.change.fire();}
+    const revision=this.revision;
+    try {const text=await readSource(doc.uri.fsPath,this.config().get('sourceEncoding','auto'));if(!this.isCurrent(revision))return;this.index.update(doc.uri.fsPath,text);this.texts.set(key(doc.uri.fsPath),text);this.change.fire();}
+    catch {if(!this.isCurrent(revision))return;this.index.remove(doc.uri.fsPath);this.texts.delete(key(doc.uri.fsPath));this.change.fire();}
   }
   fileChildren(node) {
     if(!this.project) return [];
@@ -170,7 +221,7 @@ class Workbench {
     if(node) return [];
     const folder = vscode.workspace.workspaceFolders?.[0];
     const relative = folder ? slash(path.relative(folder.uri.fsPath,this.project.path)) : this.project.path;
-    const root = this.node(this.project.name,{children:true,description:relative,tooltip:`XPR: ${this.project.path}\n工作区 → XPR: ${relative}`,icon:'circuit-board',items:[]});
+    const root = this.node(this.project.name,{children:true,contextValue:'fpgaWorkbench.project',description:relative,tooltip:`XPR: ${this.project.path}\n工作区 → XPR: ${relative}`,icon:'circuit-board',items:[]});
     for(const set of this.project.filesets) {
       const files = this.project.files.filter(f=>f.fileset === set.name);
       const setNode = this.node(set.name,{children:true,description:`${set.type} · ${files.length}`,icon:'library',items:[]});
@@ -194,14 +245,16 @@ class Workbench {
   }
   async hierChildren(node) {
     if(!this.project) return [];
+    const revision=this.revision;
     if(this.backend.running) {
       try {
         const raw = await this.backend.hierarchy(node?.hierPath || '');
+        if(!this.isCurrent(revision))return [];
         if(raw?.length || node) return (raw || []).filter(x=>['Instance','Scope','GenerateBlock','GenerateBlockArray','InstanceArray'].includes(x.kind)).map(x=>{
           const hierPath = [node?.hierPath,x.instName].filter(Boolean).join('.');
           return this.node(x.instName || x.declName || x.kind,{children:x.hasChildren !== false,description:x.declName || x.kind,icon:x.kind==='Instance'?'symbol-module':'symbol-namespace',hierPath,command:{command:'fpgaWorkbench.openHierarchy',title:'打开模块',arguments:[hierPath]}});
         });
-      } catch(e) {this.output.appendLine(`层级暂不可用: ${e.message}`);}
+      } catch(e) {if(!this.isCurrent(revision))return [];this.output.appendLine(`层级暂不可用: ${e.message}`);}
     }
     const mods = this.index.modules();
     if(!node) {
@@ -228,19 +281,21 @@ class Workbench {
   }
   async definitions(doc,pos,token) {
     if(!this.members.has(key(doc.uri.fsPath))) return [];
+    const revision=this.revision;
     this.changedDocument(doc);
     if(this.backend.running) {
-      try {return await this.backend.definitions(doc,pos,token) || [];}
-      catch(e) {this.output.appendLine(`定义查询：${e.message}`);return [];}
+      try {const results=await this.backend.definitions(doc,pos,token);return this.isCurrent(revision) ? results || [] : [];}
+      catch(e) {if(this.isCurrent(revision))this.output.appendLine(`定义查询：${e.message}`);return [];}
     }
     return this.index.definitions(doc.uri.fsPath,doc.offsetAt(pos)).map(l=>this.location(l));
   }
   async references(doc,pos,includeDeclaration,token) {
     if(!this.members.has(key(doc.uri.fsPath))) return [];
+    const revision=this.revision;
     this.changedDocument(doc);
     if(this.backend.running) {
-      try {return await this.backend.references(doc,pos,includeDeclaration,token) || [];}
-      catch(e) {this.output.appendLine(`引用查询：${e.message}`);return [];}
+      try {const results=await this.backend.references(doc,pos,includeDeclaration,token);return this.isCurrent(revision) ? results || [] : [];}
+      catch(e) {if(this.isCurrent(revision))this.output.appendLine(`引用查询：${e.message}`);return [];}
     }
     return this.index.references(doc.uri.fsPath,doc.offsetAt(pos),includeDeclaration).map(l=>this.location(l));
   }
@@ -267,18 +322,22 @@ class Workbench {
   }
   async chooseFileset() {
     if(!this.project) return this.selectProject();
+    const revision=this.revision;
     const picked=await vscode.window.showQuickPick(this.project.filesets.filter(s=>/design/i.test(s.type)).map(s=>({label:s.name,description:s.type})),{title:'选择设计文件集'});
-    if(!picked)return;this.fileset=picked.label;this.top=undefined;
-    await this.context.workspaceState.update('fileset',this.fileset);await this.context.workspaceState.update('top',undefined);await this.refresh();
+    if(!picked || !this.isCurrent(revision))return;this.fileset=picked.label;this.top=undefined;
+    await Promise.all([this.context.workspaceState.update('fileset',this.fileset),this.context.workspaceState.update('top',undefined)]);
+    if(this.isCurrent(revision))await this.refresh();
   }
   async chooseTop() {
+    const revision=this.revision;
     const picked=await vscode.window.showQuickPick([{label:'使用 XPR 顶层',value:undefined},...this.index.modules().map(m=>({label:m.name,description:path.basename(m.path),value:m.name}))],{title:'选择顶层模块'});
-    if(!picked)return;this.top=picked.value;await this.context.workspaceState.update('top',this.top);await this.refresh();
+    if(!picked || !this.isCurrent(revision))return;this.top=picked.value;await this.context.workspaceState.update('top',this.top);if(this.isCurrent(revision))await this.refresh();
   }
   async exportFilelist() {
     if(!this.project) return this.selectProject();
+    const revision=this.revision;
     const uri=await vscode.window.showSaveDialog({title:'导出工程源文件清单',defaultUri:vscode.Uri.file(path.join(this.project.root,`${this.project.name}-sources.f`)),filters:{Filelist:['f']}});
-    if(!uri)return;
+    if(!uri || !this.isCurrent(revision))return;
     const protectedKeys=new Set([this.project.path,...this.project.files.map(f=>f.path).filter(Boolean)].map(key));
     if(protectedKeys.has(key(uri.fsPath)))throw new Error('导出路径指向工程输入文件，请选择其他文件名。');
     await vscode.workspace.fs.writeFile(uri,Buffer.from(filelist(this.project,path.dirname(uri.fsPath)),'utf8'));
@@ -294,15 +353,20 @@ class Workbench {
     if(counts)this.output.appendLine(`语义服务诊断：${counts.errors} 个错误、${counts.warnings} 个警告（不是 Vivado 编译结果）。`);
     this.output.show(true);
   }
-  dispose() {clearTimeout(this.refreshTimer);clearTimeout(this.treeTimer);this.clearWatchers();void this.backend.stop();}
+  dispose() {
+    if(this.disposed)return this.loading;
+    this.disposed=true;++this.revision;
+    clearTimeout(this.refreshTimer);clearTimeout(this.treeTimer);this.clearWatchers();
+    return this.enqueue(()=>this.backend.stop());
+  }
 }
 
 function activate(context) {
   const app = new Workbench(context);active=app;
-  const commands={selectProject:u=>app.selectProject(u),refresh:()=>app.refresh(),selectFileset:()=>app.chooseFileset(),selectTop:()=>app.chooseTop(),exportFilelist:()=>app.exportFilelist(),projectInfo:()=>app.info(),peekDefinition:()=>app.navigate(true),gotoDefinition:()=>app.navigate(false),parentConnections:()=>app.findReferences(),openLocation:l=>app.openLocation(l),openHierarchy:p=>app.backend.showHierarchy(p)};
+  const commands={selectProject:u=>app.selectProject(u),switchProject:u=>app.selectProject(typeof u === 'string' || (u?.scheme === 'file' && typeof u.fsPath === 'string') ? u : undefined),closeProject:()=>app.closeProject(),refresh:()=>app.refresh(),selectFileset:()=>app.chooseFileset(),selectTop:()=>app.chooseTop(),exportFilelist:()=>app.exportFilelist(),projectInfo:()=>app.info(),peekDefinition:()=>app.navigate(true),gotoDefinition:()=>app.navigate(false),parentConnections:()=>app.findReferences(),openLocation:l=>app.openLocation(l),openHierarchy:p=>app.backend.showHierarchy(p)};
   for(const [name,handler] of Object.entries(commands)) context.subscriptions.push(vscode.commands.registerCommand(`fpgaWorkbench.${name}`,async(...args)=>{try{return await handler(...args);}catch(e){app.report(e);}}));
   void app.restore().catch(e=>app.report(e));
   return {workbench:app};
 }
-async function deactivate() {if(active)await active.backend.stop();}
+async function deactivate() {if(active)await active.dispose();}
 module.exports={activate,deactivate};

@@ -1,7 +1,7 @@
 {
   "name": "fpga-workbench",
   "displayName": "FPGA Workbench · 工程导航",
-  "description": "打开 Vivado 工程，浏览层级并跳转模块、端口和信号。",
+  "description": "任意目录打开文件夹，选中.xpr，剩下的交给我吧。",
   "version": "0.1.0",
   "publisher": "fpga-go",
   "license": "MIT",
@@ -50,6 +50,18 @@
         "title": "选择 Vivado 工程 (.xpr)",
         "category": "FPGA",
         "icon": "$(folder-opened)"
+      },
+      {
+        "command": "fpgaWorkbench.switchProject",
+        "title": "切换工程 (.xpr)",
+        "category": "FPGA",
+        "icon": "$(folder-opened)"
+      },
+      {
+        "command": "fpgaWorkbench.closeProject",
+        "title": "关闭工程",
+        "category": "FPGA",
+        "icon": "$(close)"
       },
       {
         "command": "fpgaWorkbench.refresh",
@@ -121,37 +133,60 @@
     "viewsWelcome": [
       {
         "view": "fpgaWorkbench.files",
-        "contents": "从 Vivado 工程开始编辑 RTL。\n[选择 .xpr 工程](command:fpgaWorkbench.selectProject)\n支持工作区内外的工程路径。"
+        "contents": "任意目录打开文件夹，选中.xpr，剩下的交给我吧。\n[选择 .xpr](command:fpgaWorkbench.selectProject)",
+        "when": "!fpgaWorkbench.hasProject"
       }
     ],
     "menus": {
       "view/title": [
         {
           "command": "fpgaWorkbench.selectProject",
-          "when": "view == fpgaWorkbench.files",
+          "when": "view == fpgaWorkbench.files && !fpgaWorkbench.hasProject",
           "group": "navigation@1"
         },
         {
+          "command": "fpgaWorkbench.switchProject",
+          "when": "view == fpgaWorkbench.files && fpgaWorkbench.hasProject",
+          "group": "navigation@1"
+        },
+        {
+          "command": "fpgaWorkbench.closeProject",
+          "when": "view == fpgaWorkbench.files && fpgaWorkbench.hasProject",
+          "group": "navigation@3"
+        },
+        {
           "command": "fpgaWorkbench.refresh",
-          "when": "view == fpgaWorkbench.files",
+          "when": "view == fpgaWorkbench.files && fpgaWorkbench.hasProject",
           "group": "navigation@2"
         },
         {
           "command": "fpgaWorkbench.selectFileset",
-          "when": "view == fpgaWorkbench.files"
+          "when": "view == fpgaWorkbench.files && fpgaWorkbench.loaded"
         },
         {
           "command": "fpgaWorkbench.exportFilelist",
-          "when": "view == fpgaWorkbench.files"
+          "when": "view == fpgaWorkbench.files && fpgaWorkbench.loaded"
         },
         {
           "command": "fpgaWorkbench.projectInfo",
-          "when": "view == fpgaWorkbench.files"
+          "when": "view == fpgaWorkbench.files && fpgaWorkbench.loaded"
         },
         {
           "command": "fpgaWorkbench.selectTop",
-          "when": "view == fpgaWorkbench.hierarchy",
+          "when": "view == fpgaWorkbench.hierarchy && fpgaWorkbench.loaded",
           "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "fpgaWorkbench.switchProject",
+          "when": "view == fpgaWorkbench.files && viewItem == fpgaWorkbench.project",
+          "group": "project@1"
+        },
+        {
+          "command": "fpgaWorkbench.closeProject",
+          "when": "view == fpgaWorkbench.files && viewItem == fpgaWorkbench.project",
+          "group": "project@2"
         }
       ],
       "editor/context": [

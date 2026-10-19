@@ -343,10 +343,12 @@ class SlangBackend {
   }
   async changed(uri, type = 2) {
     if (!this.running) return;
+    const client = this.client;
     try {
       const open = this.vscode.workspace.textDocuments.find(document => document.uri.toString() === uri.toString());
       if (!open && type !== 3 && hdl(uri.fsPath)) {
         const decoded = decodeSource(await fs.readFile(uri.fsPath), this.encoding);
+        if (!this.running || this.client !== client) return;
         this.syncText(uri.toString(), decoded.text);
         this.client.notify('textDocument/didSave', { textDocument: { uri: uri.toString() }, text: decoded.text });
       }
