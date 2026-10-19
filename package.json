@@ -1,8 +1,8 @@
 {
   "name": "fpga-workbench",
   "displayName": "FPGA Workbench · 工程导航",
-  "description": "任意目录打开文件夹，选中.xpr，剩下的交给我吧。",
-  "version": "0.2.1",
+  "description": "打开 Vivado .xpr，浏览工程文件和模块层级，跳转 Verilog/SystemVerilog 模块、端口与信号。",
+  "version": "0.2.3",
   "publisher": "fpga-go",
   "icon": "media/fpga-go-marketplace.png",
   "galleryBanner": {
@@ -313,7 +313,7 @@
     "url": "https://github.com/fpga-go/FPGA-Workbench.git",
     "type": "git"
   },
-  "homepage": "https://github.com/fpga-go/FPGA-Workbench#readme",
+  "homepage": "https://github.com/fpga-go/FPGA-Workbench/tree/develop#readme",
   "bugs": {
     "url": "https://github.com/fpga-go/FPGA-Workbench/issues"
   }

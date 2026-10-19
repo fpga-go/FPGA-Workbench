@@ -1,0 +1,114 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="600" viewBox="0 0 1200 600" role="img" aria-labelledby="title description">
+  <title id="title">FPGA Workbench · 工程导航：操作示意</title>
+  <desc id="description">原创操作示意。先选择自拟工程 top.xpr，再查看 top.v、child.v 和 top 下的 u_child 实例。在 child u_child (.clk(clk)); 中，模块名 child 跳转到 child.v 的模块定义，左侧端口 clk 跳转到子模块端口，右侧信号 clk 跳转到 top.v 的信号声明。这不是实际软件截图。</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b2742"/>
+      <stop offset="1" stop-color="#061726"/>
+    </linearGradient>
+    <marker id="arrow" markerWidth="7" markerHeight="7" refX="5.5" refY="3.5" orient="auto">
+      <path d="M1 1 L5.5 3.5 L1 6" fill="none" stroke="#51cbd6" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <style>
+      text { font-family: "Microsoft YaHei", "Noto Sans CJK SC", "PingFang SC", Arial, sans-serif; }
+      .mono, .mono text { font-family: Consolas, "DejaVu Sans Mono", monospace; }
+      .heading { fill: #edf7ff; font-weight: 600; }
+      .muted { fill: #a4bed2; }
+      .card { fill: #0d2942; stroke: #28516b; stroke-width: 1; }
+      .surface { fill: #081e31; stroke: #25465f; stroke-width: 1; }
+      .cyan { fill: #6ce6e8; }
+      .blue { fill: #a1cfff; }
+      .mint { fill: #a4efd4; }
+      .rule { fill: none; stroke: #40627b; stroke-width: 1.5; }
+    </style>
+  </defs>
+
+  <rect width="1200" height="600" rx="20" fill="url(#background)"/>
+  <rect x="44" y="39" width="5" height="35" rx="2.5" fill="#53d8df"/>
+  <text x="64" y="68" class="heading" font-size="32">FPGA Workbench · 工程导航</text>
+  <text x="64" y="105" class="muted" font-size="18">选择工程，查看层级，在模块与信号之间跳转。</text>
+  <rect x="1030" y="42" width="126" height="34" rx="17" fill="#163e54" stroke="#43869b"/>
+  <text x="1093" y="65" fill="#b4f1f2" font-size="16" text-anchor="middle">操作示意</text>
+
+  <rect x="44" y="150" width="220" height="378" rx="16" class="card"/>
+  <circle cx="77" cy="184" r="15" fill="#224f64"/>
+  <text x="77" y="190" class="cyan" font-size="16" font-weight="700" text-anchor="middle">1</text>
+  <text x="103" y="191" class="heading" font-size="21">选择工程</text>
+  <rect x="64" y="225" width="180" height="122" rx="12" class="surface"/>
+  <path d="M139 246 H162 L175 259 V290 H139 Z M162 246 V259 H175" fill="#153d54" stroke="#69dce2" stroke-width="2" stroke-linejoin="round"/>
+  <path d="M147 268 H165 M147 277 H160" stroke="#69dce2" stroke-width="2" stroke-linecap="round"/>
+  <text x="154" y="326" class="mono heading" font-size="21" text-anchor="middle">top.xpr</text>
+  <rect x="64" y="372" width="180" height="46" rx="10" fill="#155669" stroke="#57cbd5"/>
+  <text x="154" y="401" fill="#e1fcff" font-size="18" font-weight="600" text-anchor="middle">选择 .xpr</text>
+  <text x="154" y="459" class="muted" font-size="16" text-anchor="middle">从当前工作目录</text>
+  <text x="154" y="485" class="muted" font-size="16" text-anchor="middle">关联 Vivado 工程</text>
+
+  <path d="M270 339 H284" stroke="#51cbd6" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <rect x="292" y="150" width="254" height="378" rx="16" class="card"/>
+  <circle cx="325" cy="184" r="15" fill="#224f64"/>
+  <text x="325" y="190" class="cyan" font-size="16" font-weight="700" text-anchor="middle">2</text>
+  <text x="351" y="191" class="heading" font-size="21">查看结构</text>
+  <rect x="312" y="225" width="214" height="125" rx="12" class="surface"/>
+  <text x="330" y="252" class="muted" font-size="15">工程文件</text>
+  <path d="M332 272 V320 M332 284 H347 M332 315 H347" class="rule"/>
+  <text x="358" y="290" class="mono heading" font-size="18">top.v</text>
+  <text x="358" y="321" class="mono heading" font-size="18">child.v</text>
+  <rect x="312" y="366" width="214" height="140" rx="12" class="surface"/>
+  <text x="330" y="393" class="muted" font-size="15">模块层级</text>
+  <path d="M332 414 L337 419 L342 414" fill="none" stroke="#6bd5df" stroke-width="1.5" stroke-linecap="round"/>
+  <text x="351" y="424" class="mono heading" font-size="19">top</text>
+  <path d="M338 435 V461 H351" class="rule"/>
+  <text x="360" y="466" class="mono cyan" font-size="16">u_child : child</text>
+
+  <path d="M552 339 H566" stroke="#51cbd6" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <rect x="574" y="150" width="582" height="378" rx="16" class="card"/>
+  <circle cx="607" cy="184" r="15" fill="#224f64"/>
+  <text x="607" y="190" class="cyan" font-size="16" font-weight="700" text-anchor="middle">3</text>
+  <text x="633" y="191" class="heading" font-size="21">跳转到定义</text>
+  <rect x="594" y="225" width="542" height="113" rx="12" class="surface"/>
+  <text x="614" y="248" class="mono muted" font-size="14">top.v</text>
+  <rect x="612" y="263" width="70" height="29" rx="4" fill="#174552"/>
+  <rect x="810" y="263" width="57" height="29" rx="4" fill="#213e62"/>
+  <rect x="876" y="263" width="44" height="29" rx="4" fill="#204a45"/>
+  <g class="mono" font-size="22" xml:space="preserve">
+    <text x="614" y="285" class="cyan" textLength="66" lengthAdjust="spacingAndGlyphs">child</text>
+    <text x="680" y="285" fill="#dceaf5" textLength="132" lengthAdjust="spacingAndGlyphs"> u_child (</text>
+    <text x="812" y="285" class="blue" textLength="52.8" lengthAdjust="spacingAndGlyphs">.clk</text>
+    <text x="864.8" y="285" fill="#dceaf5" textLength="13.2" lengthAdjust="spacingAndGlyphs">(</text>
+    <text x="878" y="285" class="mint" textLength="39.6" lengthAdjust="spacingAndGlyphs">clk</text>
+    <text x="917.6" y="285" fill="#dceaf5" textLength="39.6" lengthAdjust="spacingAndGlyphs">));</text>
+  </g>
+  <path d="M647 294 V300 M838 294 V300 M898 294 V300" stroke="#55798d" stroke-width="1.2"/>
+  <circle cx="647" cy="313" r="10" fill="#1d5a65"/>
+  <text x="647" y="317" fill="#c7fcff" font-size="12" font-weight="700" text-anchor="middle">A</text>
+  <circle cx="838" cy="313" r="10" fill="#294d73"/>
+  <text x="838" y="317" fill="#d2e8ff" font-size="12" font-weight="700" text-anchor="middle">B</text>
+  <circle cx="898" cy="313" r="10" fill="#28594e"/>
+  <text x="898" y="317" fill="#d6ffed" font-size="12" font-weight="700" text-anchor="middle">C</text>
+
+  <rect x="594" y="354" width="542" height="44" rx="9" fill="#103448"/>
+  <circle cx="615" cy="376" r="10" fill="#1d5a65"/>
+  <text x="615" y="380" fill="#c7fcff" font-size="12" font-weight="700" text-anchor="middle">A</text>
+  <text x="638" y="382" class="cyan" font-size="17">模块名</text>
+  <path d="M741 376 H759" stroke="#51cbd6" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="778" y="382" class="mono heading" font-size="17">child.v · module child</text>
+
+  <rect x="594" y="408" width="542" height="44" rx="9" fill="#122f49"/>
+  <circle cx="615" cy="430" r="10" fill="#294d73"/>
+  <text x="615" y="434" fill="#d2e8ff" font-size="12" font-weight="700" text-anchor="middle">B</text>
+  <text x="638" y="436" class="blue" font-size="17">子模块端口</text>
+  <path d="M741 430 H759" stroke="#51cbd6" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="778" y="436" class="mono heading" font-size="17">child.v · input clk</text>
+
+  <rect x="594" y="462" width="542" height="44" rx="9" fill="#113a3f"/>
+  <circle cx="615" cy="484" r="10" fill="#28594e"/>
+  <text x="615" y="488" fill="#d6ffed" font-size="12" font-weight="700" text-anchor="middle">C</text>
+  <text x="638" y="490" class="mint" font-size="17">父模块信号</text>
+  <path d="M741 484 H759" stroke="#51cbd6" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="778" y="490" class="mono heading" font-size="17">top.v · wire clk</text>
+
+  <text x="44" y="568" class="muted" font-size="16">Ctrl + 单击 / F12 转到定义</text>
+  <text x="1156" y="568" class="muted" font-size="16" text-anchor="end">Alt + F12 速览定义</text>
+</svg>
