@@ -1,14 +1,17 @@
 **
 !package.json
 !README.md
+!CHANGELOG.md
 !LICENSE.txt
 !THIRD_PARTY_NOTICES.txt
 !language-configuration.json
 !dist/extension.js
 !media/fpga.svg
+!media/fpga-go.png
 !syntaxes/*.json
 !vendor/slang/**
 !vendor/licenses/**
 !VERIFICATION.md
 !PUBLISHING.md
 !docs/USAGE.md
+!docs/RELEASING.md

@@ -1,0 +1,2 @@
+0e58a33618a3837ca75ca4a21d358b93800716bfcdb565ff0f064df375820408  fpga-workbench-0.1.1-win32-x64.vsix
+8ba114c339deb38cbae623a71ff6559a30bacb5593b027ad79c1e0f17280b05f  fpga-workbench-0.1.2-win32-x64.vsix

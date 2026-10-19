@@ -2,8 +2,13 @@
   "name": "fpga-workbench",
   "displayName": "FPGA Workbench · 工程导航",
   "description": "任意目录打开文件夹，选中.xpr，剩下的交给我吧。",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "fpga-go",
+  "icon": "media/fpga-go.png",
+  "galleryBanner": {
+    "color": "#082B50",
+    "theme": "dark"
+  },
   "license": "MIT",
   "private": true,
   "engines": {
@@ -34,7 +39,7 @@
     "build": "node scripts/build.js",
     "test": "node --test test/*.test.js",
     "vscode:prepublish": "npm run build",
-    "package": "vsce package --target win32-x64 --no-dependencies --allow-missing-repository --no-rewrite-relative-links --out output/fpga-workbench-0.1.0-win32-x64.vsix"
+    "package": "node scripts/package.js"
   },
   "dependencies": {
     "fast-xml-parser": "^5.3.0"

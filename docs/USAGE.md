@@ -8,7 +8,7 @@ Windows x64 安装包自带 slang-server v0.3.0，无需另装 Python、Ctags �
 
 ## 安装和开始使用
 
-1. 在 VS Code 扩展面板右上角的 `…` 菜单中选择“从 VSIX 安装”，打开 `fpga-workbench-0.1.0-win32-x64.vsix`。
+1. 从仓库 Releases 下载 VSIX，在 VS Code 扩展面板右上角的 `…` 菜单中选择“从 VSIX 安装”，打开下载的安装包。
 2. 打开日常使用的工作目录，点击左侧芯片图标 **FPGA Workbench**。
 3. 点击“选择 Vivado 工程 (.xpr)”，选择工程。工程可以位于工作区内，也可以位于其他目录。
 4. 展开“工程文件”查看文件集和目录，展开“模块层级”查看实例。点击文件或模块即可编辑。
@@ -78,7 +78,7 @@ npm run build
 npm run package
 ```
 
-VSIX 输出到 `output/`。源码入口为 `src/extension.js`，工程解析、结构索引和语义服务分别位于 `src/xpr.js`、`src/indexer.js`、`src/slang.js`。
+VSIX 输出到 `output/`，文件名自动采用 `package.json` 中的版本号。`feature` 测试版使用 `npm run package -- --pre-release` 打包；分支和发布规则见 [版本维护](RELEASING.md)。源码入口为 `src/extension.js`，工程解析、结构索引和语义服务分别位于 `src/xpr.js`、`src/indexer.js`、`src/slang.js`。
 
 验证结果和未覆盖范围见 [VERIFICATION.md](../VERIFICATION.md)。准备上传源码或分发安装包时，按 [PUBLISHING.md](../PUBLISHING.md) 检查发布目录和归档内容。
 
