@@ -1,0 +1,13 @@
+{
+  "nodable-entities.txt": {
+    "package": "@nodable/entities",
+    "version": "3.1.0",
+    "license": "MIT",
+    "source": "https://raw.githubusercontent.com/nodable/val-parsers/main/LICENSE",
+    "sha256": "750cb3fb6362804957ef52caaf9b5c824015be44d494637330d7cd8834d31d40",
+    "revisionLimitation": "The retrieval URL uses the mutable main branch. A matching immutable upstream revision was not independently verified; sha256 identifies the exact license text shipped.",
+    "repository": "https://github.com/nodable/val-parsers",
+    "retrievedOn": "2026-10-19",
+    "reason": "The npm package omits LICENSE; this is the unmodified official repository license."
+  }
+}

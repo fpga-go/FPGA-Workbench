@@ -1,0 +1,280 @@
+{
+  "name": "fpga-workbench",
+  "displayName": "FPGA Workbench · 工程导航",
+  "description": "从 Vivado XPR 打开工程，浏览文件与模块层级，跳转 Verilog/SystemVerilog 模块、端口和信号。",
+  "version": "0.1.0",
+  "publisher": "fpga-go",
+  "license": "MIT",
+  "private": true,
+  "engines": {
+    "vscode": "^1.96.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Other"
+  ],
+  "keywords": [
+    "FPGA",
+    "Vivado",
+    "Verilog",
+    "SystemVerilog",
+    "XPR"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false
+    },
+    "virtualWorkspaces": false
+  },
+  "scripts": {
+    "build": "node scripts/build.js",
+    "test": "node --test test/*.test.js",
+    "vscode:prepublish": "npm run build",
+    "package": "vsce package --target win32-x64 --no-dependencies --allow-missing-repository --no-rewrite-relative-links --out output/fpga-workbench-0.1.0-win32-x64.vsix"
+  },
+  "dependencies": {
+    "fast-xml-parser": "^5.3.0"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "^3.7.0",
+    "esbuild": "^0.25.0"
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "fpgaWorkbench.selectProject",
+        "title": "选择 Vivado 工程 (.xpr)",
+        "category": "FPGA",
+        "icon": "$(folder-opened)"
+      },
+      {
+        "command": "fpgaWorkbench.refresh",
+        "title": "刷新工程索引",
+        "category": "FPGA",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "fpgaWorkbench.selectFileset",
+        "title": "选择设计文件集",
+        "category": "FPGA",
+        "icon": "$(list-selection)"
+      },
+      {
+        "command": "fpgaWorkbench.selectTop",
+        "title": "选择顶层模块",
+        "category": "FPGA",
+        "icon": "$(circuit-board)"
+      },
+      {
+        "command": "fpgaWorkbench.exportFilelist",
+        "title": "导出 Filelist",
+        "category": "FPGA",
+        "icon": "$(export)"
+      },
+      {
+        "command": "fpgaWorkbench.projectInfo",
+        "title": "查看工程路径与索引状态",
+        "category": "FPGA",
+        "icon": "$(info)"
+      },
+      {
+        "command": "fpgaWorkbench.peekDefinition",
+        "title": "速览定义（当前工程）",
+        "category": "FPGA"
+      },
+      {
+        "command": "fpgaWorkbench.gotoDefinition",
+        "title": "转到定义（当前工程）",
+        "category": "FPGA"
+      },
+      {
+        "command": "fpgaWorkbench.parentConnections",
+        "title": "查找引用（当前工程）",
+        "category": "FPGA"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "fpgaWorkbench",
+          "title": "FPGA Workbench",
+          "icon": "media/fpga.svg"
+        }
+      ]
+    },
+    "views": {
+      "fpgaWorkbench": [
+        {
+          "id": "fpgaWorkbench.files",
+          "name": "工程文件"
+        },
+        {
+          "id": "fpgaWorkbench.hierarchy",
+          "name": "模块层级"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "fpgaWorkbench.files",
+        "contents": "从 Vivado 工程开始编辑 RTL。\n[选择 .xpr 工程](command:fpgaWorkbench.selectProject)\n支持工作区内外的工程路径。"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "fpgaWorkbench.selectProject",
+          "when": "view == fpgaWorkbench.files",
+          "group": "navigation@1"
+        },
+        {
+          "command": "fpgaWorkbench.refresh",
+          "when": "view == fpgaWorkbench.files",
+          "group": "navigation@2"
+        },
+        {
+          "command": "fpgaWorkbench.selectFileset",
+          "when": "view == fpgaWorkbench.files"
+        },
+        {
+          "command": "fpgaWorkbench.exportFilelist",
+          "when": "view == fpgaWorkbench.files"
+        },
+        {
+          "command": "fpgaWorkbench.projectInfo",
+          "when": "view == fpgaWorkbench.files"
+        },
+        {
+          "command": "fpgaWorkbench.selectTop",
+          "when": "view == fpgaWorkbench.hierarchy",
+          "group": "navigation"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "fpgaWorkbench.peekDefinition",
+          "when": "fpgaWorkbench.loaded && resourceExtname =~ /\\.(v|sv|vh|svh)$/",
+          "group": "navigation@10"
+        },
+        {
+          "command": "fpgaWorkbench.gotoDefinition",
+          "when": "fpgaWorkbench.loaded && resourceExtname =~ /\\.(v|sv|vh|svh)$/",
+          "group": "navigation@11"
+        },
+        {
+          "command": "fpgaWorkbench.parentConnections",
+          "when": "fpgaWorkbench.loaded && resourceExtname =~ /\\.(v|sv|vh|svh)$/",
+          "group": "navigation@12"
+        }
+      ]
+    },
+    "languages": [
+      {
+        "id": "verilog",
+        "extensions": [
+          ".v",
+          ".vh"
+        ],
+        "aliases": [
+          "Verilog"
+        ],
+        "configuration": "language-configuration.json"
+      },
+      {
+        "id": "systemverilog",
+        "extensions": [
+          ".sv",
+          ".svh"
+        ],
+        "aliases": [
+          "SystemVerilog"
+        ],
+        "configuration": "language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "verilog",
+        "scopeName": "source.verilog",
+        "path": "syntaxes/hdl.tmLanguage.json"
+      },
+      {
+        "language": "systemverilog",
+        "scopeName": "source.systemverilog",
+        "path": "syntaxes/systemverilog.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "FPGA Workbench",
+      "properties": {
+        "fpgaWorkbench.backend": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "builtin",
+            "slang"
+          ],
+          "default": "auto",
+          "description": "auto 优先使用自带/指定的 slang-server；builtin 使用有限结构索引。修改后刷新工程。"
+        },
+        "fpgaWorkbench.slangPath": {
+          "type": "string",
+          "default": "",
+          "description": "可选：slang-server 可执行文件的绝对路径。"
+        },
+        "fpgaWorkbench.sourceEncoding": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "utf-8",
+            "gb18030"
+          ],
+          "default": "auto",
+          "description": "关闭文件的读取编码；auto 先检查 UTF-8，再按 GB18030 解码。源文件不会被改写。"
+        },
+        "fpgaWorkbench.includeSimulation": {
+          "type": "boolean",
+          "default": false,
+          "description": "将仿真文件集加入索引。"
+        },
+        "fpgaWorkbench.extraIncludeDirs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "额外 include 目录；相对路径以 XPR 所在目录为基准。"
+        },
+        "fpgaWorkbench.extraDefines": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "额外宏定义，例如 SIMULATION 或 WIDTH=32。"
+        },
+        "fpgaWorkbench.watchFiles": {
+          "type": "boolean",
+          "default": true,
+          "description": "监听工程文件在编辑器外的更改。"
+        }
+      }
+    }
+  },
+  "author": {
+    "name": "fpga-go",
+    "email": "fpga_go@163.com"
+  },
+  "repository": {
+    "url": "https://github.com/fpga-go/FPGA-Workbench.git",
+    "type": "git"
+  },
+  "homepage": "https://github.com/fpga-go/FPGA-Workbench#readme",
+  "bugs": {
+    "url": "https://github.com/fpga-go/FPGA-Workbench/issues"
+  }
+}

@@ -1,0 +1,13 @@
+**
+!package.json
+!README.md
+!LICENSE.txt
+!THIRD_PARTY_NOTICES.txt
+!language-configuration.json
+!dist/extension.js
+!media/fpga.svg
+!syntaxes/*.json
+!vendor/slang/**
+!vendor/licenses/**
+!VERIFICATION.md
+!PUBLISHING.md

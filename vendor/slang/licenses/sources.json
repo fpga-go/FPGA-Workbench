@@ -1,0 +1,117 @@
+{
+  "schemaVersion": 1,
+  "distribution": "Bundled slang-server Windows x64 v0.3.0",
+  "retrievedOn": "2026-10-19",
+  "binaryDistribution": {
+    "archive": "slang-server-windows-x64.zip",
+    "source": "https://github.com/hudson-trading/slang-server/releases/download/v0.3.0/slang-server-windows-x64.zip",
+    "sha256": "23bb65882a364bc1adf92a9b9ce7d1dac3d7546e29ac2acf53dbc0010a4eda2d",
+    "executable": "../slang-server.exe",
+    "executableSha256": "d8d6cca72ed478b403d25f63524c82b60a38e3956a8e38f3bff510dbca947c53",
+    "executableBytes": 8069120,
+    "verification": "The bundled executable matches slang-server.exe in the downloaded official release archive by SHA256."
+  },
+  "basis": "Pinned upstream submodules and CMake dependencies; no modified upstream source is shipped.",
+  "configurationEvidence": {
+    "slangUseThreads": "ON by default",
+    "slangUseMimalloc": "ON by default; pinned to v3.4.5",
+    "reflectJson": "ON",
+    "reflectBundledDependencies": "ON",
+    "reflectAdditionalFormats": "OFF by default",
+    "cpptrace": "Not present in the pinned CMake dependency configuration",
+    "buildLimitation": "Release binary build cache is not included upstream; dependency coverage follows pinned default source configuration."
+  },
+  "sources": [
+    {
+      "component": "slang-server",
+      "version": "0.3.0",
+      "license": "MIT",
+      "file": "../LICENSE",
+      "source": "https://raw.githubusercontent.com/hudson-trading/slang-server/v0.3.0/LICENSE",
+      "sha256": "58d91ba3f33e833a02a69199a92c1c327000fcb859973e488322317396ddc67a"
+    },
+    {
+      "component": "slang",
+      "revision": "9d75946e066cdf3d9bc109865e81392cf2892b96",
+      "license": "MIT",
+      "file": "../LICENSE-slang",
+      "source": "https://raw.githubusercontent.com/AndrewNolte/slang/9d75946e066cdf3d9bc109865e81392cf2892b96/LICENSE",
+      "sha256": "0aaa5e55c23baad51bdab241e36220d2fa8df1147ce289a81a58ae4d1c1502fe"
+    },
+    {
+      "component": "ctre",
+      "revision": "6225211806c48230e5d17a1e555ef69e7325051c",
+      "license": "Apache-2.0 WITH LLVM-exception",
+      "file": "ctre-LICENSE.txt",
+      "source": "https://raw.githubusercontent.com/hanickadot/compile-time-regular-expressions/6225211806c48230e5d17a1e555ef69e7325051c/LICENSE",
+      "sha256": "9e45e856bedccee9f67254082ca11851d954de2fed7448c4bed19ad9aab99a91"
+    },
+    {
+      "component": "reflect-cpp",
+      "revision": "a26047a4d3bdbd5cf6b65995cbc5e7862e241c57",
+      "license": "MIT",
+      "file": "reflect-cpp-LICENSE.txt",
+      "source": "https://raw.githubusercontent.com/getml/reflect-cpp/a26047a4d3bdbd5cf6b65995cbc5e7862e241c57/LICENSE",
+      "sha256": "b0bf8c84bdd9987844acc307012738971d2f2c184898ddfa67681f8fdf36f29b"
+    },
+    {
+      "component": "yyjson bundled by reflect-cpp",
+      "revision": "a26047a4d3bdbd5cf6b65995cbc5e7862e241c57",
+      "license": "MIT",
+      "file": "yyjson-LICENSE.txt",
+      "source": "https://raw.githubusercontent.com/getml/reflect-cpp/a26047a4d3bdbd5cf6b65995cbc5e7862e241c57/src/yyjson.c",
+      "extraction": "Complete leading license comment; code excluded.",
+      "sha256": "9d5ba1d29b6f58e63f8e85d00deee0179fee041f7b4f483f0a4ad5d8d898c0e3"
+    },
+    {
+      "component": "fmt",
+      "version": "12.2.0",
+      "license": "MIT",
+      "file": "fmt-LICENSE.txt",
+      "source": "https://raw.githubusercontent.com/fmtlib/fmt/12.2.0/LICENSE",
+      "sha256": "a65fcc5a1095fc33cc37e4fff69366e49d7e92f613558a2b95ed1b70e33758b4"
+    },
+    {
+      "component": "Boost regex and bundled Boost headers",
+      "version": "1.91.0",
+      "license": "BSL-1.0",
+      "file": "boost-LICENSE.txt",
+      "source": "https://raw.githubusercontent.com/boostorg/boost/boost-1.91.0/LICENSE_1_0.txt",
+      "sha256": "c9bff75738922193e67fa726fa225535870d2aa1059f91452c411736284ad566"
+    },
+    {
+      "component": "tomlplusplus",
+      "version": "3.4.0",
+      "license": "MIT",
+      "file": "tomlplusplus-LICENSE.txt",
+      "source": "https://raw.githubusercontent.com/marzer/tomlplusplus/v3.4.0/LICENSE",
+      "sha256": "529bc3900a9571e49db285b0df432397e70b881cc3bf48de6667ae74ff4b06d8"
+    },
+    {
+      "component": "BS thread pool",
+      "version": "5.1.0",
+      "license": "MIT",
+      "file": "thread-pool-LICENSE.txt",
+      "source": "https://raw.githubusercontent.com/bshoshany/thread-pool/v5.1.0/LICENSE.txt",
+      "repository": "https://github.com/bshoshany/thread-pool",
+      "sha256": "712a867cc12ebfcdecf6cea097f5aa7ec5acaa435a8f818c9f370960df35acbf"
+    },
+    {
+      "component": "expected-lite",
+      "version": "0.9.0",
+      "license": "BSL-1.0",
+      "file": "expected-lite-LICENSE.txt",
+      "source": "https://raw.githubusercontent.com/AndrewNolte/slang/9d75946e066cdf3d9bc109865e81392cf2892b96/external/expected.hpp",
+      "extraction": "Complete leading attribution comment plus Boost Software License 1.0 text from boost-LICENSE.txt.",
+      "sha256": "a7727371645730101de5d9be7823a87367b5c27d6f6d1c998a39edbd334786f3"
+    },
+    {
+      "component": "mimalloc",
+      "version": "3.4.5",
+      "license": "MIT",
+      "file": "mimalloc-LICENSE.txt",
+      "source": "https://raw.githubusercontent.com/microsoft/mimalloc/v3.4.5/LICENSE",
+      "sha256": "82ade5d7d9b029044b5fbbc326207fc47c2d44ee4dd71e8a559c36d728217de9"
+    }
+  ]
+}

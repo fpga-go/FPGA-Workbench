@@ -1,0 +1,11 @@
+* text=auto
+*.js text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.svg text eol=lf
+*.txt text eol=lf
+*.exe binary
+*.vsix binary
+*.zip binary
+# Preserve upstream files and their recorded hashes exactly.
+vendor/** -text -whitespace
