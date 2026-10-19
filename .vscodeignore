@@ -7,7 +7,7 @@
 !language-configuration.json
 !dist/extension.js
 !media/fpga.svg
-!media/fpga-go.png
+!media/fpga-go-marketplace.png
 !syntaxes/*.json
 !vendor/slang/**
 !vendor/licenses/**

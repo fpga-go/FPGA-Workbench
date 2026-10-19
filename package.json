@@ -2,9 +2,9 @@
   "name": "fpga-workbench",
   "displayName": "FPGA Workbench · 工程导航",
   "description": "任意目录打开文件夹，选中.xpr，剩下的交给我吧。",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "publisher": "fpga-go",
-  "icon": "media/fpga-go.png",
+  "icon": "media/fpga-go-marketplace.png",
   "galleryBanner": {
     "color": "#082B50",
     "theme": "dark"
