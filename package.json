@@ -1,7 +1,7 @@
 {
   "name": "fpga-workbench",
   "displayName": "FPGA Workbench · 工程导航",
-  "description": "从 Vivado XPR 打开工程，浏览文件与模块层级，跳转 Verilog/SystemVerilog 模块、端口和信号。",
+  "description": "打开 Vivado 工程，浏览层级并跳转模块、端口和信号。",
   "version": "0.1.0",
   "publisher": "fpga-go",
   "license": "MIT",
