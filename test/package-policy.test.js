@@ -26,6 +26,7 @@ function runPackage({ branch = 'feature', args = [], gitResult, packageResult = 
       },
     },
     './package-policy': policy,
+    './package-assets': { validatePackageIcon: () => {} },
     '../package.json': { name: 'fpga-workbench', version: '0.9.0' },
   };
   const mockedRequire = name => {
