@@ -8,6 +8,7 @@
 !dist/extension.js
 !media/fpga.svg
 !media/fpga-go-marketplace.png
+!media/navigation-overview.png
 !syntaxes/*.json
 !vendor/slang/**
 !vendor/licenses/**

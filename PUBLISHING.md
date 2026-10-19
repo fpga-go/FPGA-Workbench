@@ -7,13 +7,15 @@
 | 项目 | 当前值 |
 |---|---|
 | 插件作者 | `fpga-go` |
+| 插件显示名 | `FPGA Workbench · 工程导航` |
+| 扩展唯一标识 | `fpga-go.fpga-workbench` |
 | 联系邮箱 | `fpga_go@163.com` |
 | Git 提交用户名 | `go` |
 | Git 提交邮箱 | `fpga_go@163.com` |
 | 扩展清单中的 publisher | `fpga-go` |
 | 原始代码许可证声明 | `MIT` |
 
-`package.json` 中的 publisher 是扩展标识的一部分，不代表已注册同名 Marketplace 发布者，也不代表扩展已上架。Git 提交身份与 Marketplace 发布者是不同配置。
+`package.json` 中的 publisher 与 name 共同组成扩展标识。介绍更新保留显示名及这两个值，原有安装与设置继续沿用。Git 提交身份与 Marketplace 发布者是不同配置；发布状态以市场实际结果为准。
 
 源码仓库：[fpga-go/FPGA-Workbench](https://github.com/fpga-go/FPGA-Workbench)。`package.json` 已填写对应的 repository、homepage 和 bugs 地址。
 
