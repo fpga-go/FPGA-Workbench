@@ -66,6 +66,8 @@ test('reads design scope while retaining constraints, disabled and missing entri
   assert.equal(loaded.top, 'top');
   assert.equal(loaded.part, 'test-part');
   assert.equal(loaded.vivadoVersion, '2023.1');
+  assert.deepEqual(loaded.filesets.find(item => item.name === 'sim_1').srcSets, ['sources_1']);
+  assert.deepEqual(loaded.filesets.find(item => item.name === 'sources_1').srcSets, []);
   assert.deepEqual(loaded.sourceFiles, ['fixture.srcs/rtl/top.v', 'include/header.svh', 'helper.v'].map(name => path.join(root, name)));
   assert.equal(loaded.files.find(item => item.rawPath.includes('disabled.v')).enabled, false);
   assert.equal(loaded.files.find(item => item.rawPath.includes('not_enabled')).enabled, false);
@@ -116,6 +118,14 @@ test('discovers only existing exact IP stubs, prefers gen path and deduplicates 
   assert.deepEqual(loaded.sourceFiles, [path.join(root, 'top.v'), path.join(root, 'fixture.gen/sources_1/ip/fifo/fifo_stub.v')]);
   assert.equal(loaded.files.filter(item => item.generated).length, 1);
   assert.ok(loaded.files.find(item => item.generated).origin.endsWith('fifo.xci'));
+  assert.equal(loaded.ipReferences.length, 1);
+  assert.deepEqual(loaded.ipReferences[0].filesets, ['sources_1', 'fifo']);
+  assert.equal(loaded.ipReferences[0].netlistExistence, 'exists');
+  const text = filelist(loaded, root);
+  assert.deepEqual(text.split('\n').filter(line => line && !line.startsWith('//')), ['top.v']);
+  assert.match(text, /\/\/ XCI original path: \$PSRCDIR\/sources_1\/ip\/fifo\/fifo\.xci/);
+  assert.match(text, /\/\/ Simulation netlist candidate \[exists\]: fixture\.gen\/sources_1\/ip\/fifo\/fifo_sim_netlist\.v/);
+  assert.equal(loaded.sourceFiles.length, 2, 'export does not remove the navigation stub');
   assert.deepEqual((await loadProject(xpr, { includeIpStubs: false })).sourceFiles, [path.join(root, 'top.v')]);
 });
 
@@ -128,6 +138,108 @@ test('exports relative quoted source paths and explicitly identifies static orde
   assert.throws(() => filelist({ sourceFiles: [path.join(root, 'bad"name.v')] }), /无法将路径/);
   const acrossDrives = filelist({ sourceFiles: ['D:\\shared\\child.v'] }, 'C:\\project');
   assert.match(acrossDrives, /D:\/shared\/child.v/);
+});
+
+test('filelist header records supplied output and XPR metadata without claiming a running Vivado', async t => {
+  const { root, xpr } = await fixture(t, project(set('sources_1', 'DesignSrcs', file('top.v'), '<Option Name="TopModule" Val="top"/>')), ['top.v']);
+  const loaded = await loadProject(xpr);
+  const output = path.join(root, 'export folder', 'sources.f');
+  const exportedAt = '2026-10-23T10:20:30.000Z';
+  const text = filelist(loaded, path.dirname(output), { outputPath: output, exportedAt, top: 'selected_top' });
+  assert.ok(text.includes(`// Output file: ${output.replace(/\\/g, '/')}`));
+  assert.match(text, /\/\/ Project: fixture/);
+  assert.ok(text.includes(`// XPR: ${xpr.replace(/\\/g, '/')}`));
+  assert.match(text, /\/\/ Part: test-part/);
+  assert.match(text, /XPR-recorded Vivado version: 2023\.1 \(not the installed tool version\)/);
+  assert.ok(text.includes(`// Exported at (ISO 8601 with timezone): ${exportedAt}`));
+  assert.match(text, /Selected filesets: sources_1/);
+  assert.match(text, /Top: selected_top/);
+  assert.match(text, /simulation indexing excluded/);
+  assert.match(text, /active source paths 1; XCI references 0/);
+  assert.match(text, /NOT elaborated compile order/);
+  assert.deepEqual(text.split('\n').filter(line => line && !line.startsWith('//')), ['../top.v']);
+  const unknown = filelist({ sourceFiles: [] });
+  assert.match(unknown, /Output file: not recorded/);
+  assert.match(unknown, /XPR-recorded Vivado version: not recorded/);
+  assert.match(unknown, /Exported at \(ISO 8601 with timezone\): \d{4}-\d{2}-\d{2}T[^\n]+Z/);
+});
+
+test('filelist keeps IP paths comment-only when netlists or XCIs are missing or unresolved', async t => {
+  const xml = project(set('sources_1', 'DesignSrcs', file('top.v')
+    + file('$PSRCDIR/sources_1/ip/empty/empty.xci')
+    + file('$PSRCDIR/sources_1/ip/missing/missing.xci')
+    + file('$UNKNOWN/unresolved.xci')));
+  const { root, xpr } = await fixture(t, xml, ['top.v', 'fixture.srcs/sources_1/ip/empty/empty.xci']);
+  const loaded = await loadProject(xpr);
+  assert.deepEqual(loaded.ipReferences.map(reference => [reference.existence, reference.netlistExistence]),
+    [['exists', 'missing'], ['missing', 'missing'], ['unknown', 'unknown']]);
+  const text = filelist(loaded, root);
+  assert.match(text, /XCI resolved \[missing\]: fixture\.srcs\/sources_1\/ip\/missing\/missing\.xci/);
+  assert.match(text, /Simulation netlist candidate \[missing\]: fixture\.gen\/sources_1\/ip\/empty\/empty_sim_netlist\.v/);
+  assert.match(text, /XCI original path: \$UNKNOWN\/unresolved\.xci/);
+  assert.match(text, /XCI resolved \[unknown\]: unresolved/);
+  assert.match(text, /Simulation netlist candidate \[unknown\]: unresolved/);
+  assert.deepEqual(text.split('\n').filter(line => line && !line.startsWith('//')), ['top.v']);
+  assert.equal(await fs.stat(path.join(root, 'fixture.gen')).catch(error => error.code), 'ENOENT', 'export never generates IP outputs');
+});
+
+test('filelist excludes precise IP artifacts already listed in XPR but retains unrelated stub-named RTL', async t => {
+  const prefix = '$PGENDIR/sources_1/ip/fifo/fifo';
+  const xml = project(set('sources_1', 'DesignSrcs', file('top.v') + file('ordinary_stub.v')
+    + file('$PSRCDIR/sources_1/ip/fifo/fifo.xci') + file(`${prefix}_stub.v`) + file(`${prefix}_sim_netlist.v`)
+    + file('$PSRCDIR/sources_1/bd/system/system.bd')));
+  const { root, xpr } = await fixture(t, xml, ['top.v', 'ordinary_stub.v', 'fixture.srcs/sources_1/ip/fifo/fifo.xci',
+    'fixture.gen/sources_1/ip/fifo/fifo_stub.v', 'fixture.gen/sources_1/ip/fifo/fifo_sim_netlist.v', 'fixture.srcs/sources_1/bd/system/system.bd']);
+  const loaded = await loadProject(xpr);
+  const before = [...loaded.sourceFiles];
+  const text = filelist(loaded, root);
+  assert.deepEqual(text.split('\n').filter(line => line && !line.startsWith('//')), ['top.v', 'ordinary_stub.v']);
+  assert.deepEqual(loaded.sourceFiles, before, 'export leaves existing navigation inputs untouched');
+  assert.match(text, /XCI references 1/);
+  assert.doesNotMatch(text, /system\.bd/);
+});
+
+test('IP reference candidates follow non-default fileset layout and exclude inactive or disabled IPs', async t => {
+  const xml = project(set('sources_1', 'DesignSrcs', file('$PSRCDIR/sources_1/ip/old/old.xci'))
+    + set('sources_2', 'DesignSrcs', file('$PSRCDIR/sources_2/ip/new/new.xci')
+      + file('$PSRCDIR/sources_2/ip/disabled/disabled.xci', attr('IsEnabled', 'false'))))
+    .replace('</Project>', '<Runs><Run Id="synth_2" Type="Ft3:Synth" State="current" SrcSet="sources_2"/></Runs></Project>');
+  const { root, xpr } = await fixture(t, xml, ['fixture.srcs/sources_1/ip/old/old.xci',
+    'fixture.srcs/sources_2/ip/new/new.xci', 'fixture.srcs/sources_2/ip/disabled/disabled.xci']);
+  const loaded = await loadProject(xpr);
+  assert.equal(loaded.ipReferences.length, 1);
+  assert.equal(loaded.ipReferences[0].netlistPath, path.join(root, 'fixture.gen/sources_2/ip/new/new_sim_netlist.v'));
+  assert.doesNotMatch(filelist(loaded, root), /old\.xci|disabled\.xci/);
+});
+
+test('external IP gets an explicitly inferred project-generated candidate and metadata cannot escape comments', async t => {
+  const xml = project(set('sources_1', 'DesignSrcs', file('$PPRDIR/shared ip/remote.xci')));
+  const { root, xpr } = await fixture(t, xml, ['shared ip/remote.xci']);
+  const loaded = await loadProject(xpr);
+  assert.equal(loaded.ipReferences[0].netlistPath, path.join(root, 'fixture.gen/sources_1/ip/remote/remote_sim_netlist.v'));
+  loaded.name = 'fixture\ninjected.v';
+  loaded.ipReferences[0].rawPaths.push('untrusted\rinjected.sv');
+  const text = filelist(loaded, root);
+  assert.match(text, /XCI resolved \[exists\]: "shared ip\/remote\.xci"/);
+  assert.match(text, /Candidate netlist paths are inferred/);
+  assert.match(text, /Project: fixture injected\.v/);
+  assert.match(text, /XCI original path: untrusted injected\.sv/);
+  assert.deepEqual(text.split('\n').filter(line => line && !line.startsWith('//')), []);
+});
+
+test('external XCI excludes its explicitly registered conventional generated stub without hiding unrelated names', async t => {
+  const prefix = '$PGENDIR/sources_1/ip/remote/remote';
+  const xml = project(set('sources_1', 'DesignSrcs', file('top.v') + file('ordinary/remote_stub.v')
+    + file(`${prefix}_stub.v`) + file('$PPRDIR/shared ip/remote.xci') + file(`${prefix}_sim_netlist.v`)));
+  const { root, xpr } = await fixture(t, xml, ['top.v', 'ordinary/remote_stub.v', 'shared ip/remote.xci',
+    'fixture.gen/sources_1/ip/remote/remote_stub.v', 'fixture.gen/sources_1/ip/remote/remote_sim_netlist.v']);
+  const loaded = await loadProject(xpr);
+  const before = [...loaded.sourceFiles];
+  const text = filelist(loaded, root);
+  assert.deepEqual(text.split('\n').filter(line => line && !line.startsWith('//')), ['top.v', 'ordinary/remote_stub.v']);
+  assert.deepEqual(loaded.sourceFiles, before);
+  assert.equal(loaded.ipReferences[0].netlistExistence, 'exists');
+  assert.match(text, /Simulation netlist candidate \[exists\]: fixture\.gen\/sources_1\/ip\/remote\/remote_sim_netlist\.v/);
 });
 
 test('rejects malformed XML and external declarations instead of guessing a file tree', async t => {

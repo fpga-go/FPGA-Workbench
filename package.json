@@ -2,7 +2,7 @@
   "name": "fpga-workbench",
   "displayName": "FPGA Workbench · 工程导航",
   "description": "打开 Vivado .xpr，浏览工程文件和模块层级，跳转 Verilog/SystemVerilog 模块、端口与信号。",
-  "version": "0.2.3",
+  "version": "0.2.7",
   "publisher": "fpga-go",
   "icon": "media/fpga-go-marketplace.png",
   "galleryBanner": {
@@ -93,6 +93,12 @@
         "icon": "$(export)"
       },
       {
+        "command": "fpgaWorkbench.openFilelistSkill",
+        "title": "打开 Filelist Skill",
+        "category": "FPGA",
+        "icon": "$(book)"
+      },
+      {
         "command": "fpgaWorkbench.projectInfo",
         "title": "查看工程路径与索引状态",
         "category": "FPGA",
@@ -100,12 +106,12 @@
       },
       {
         "command": "fpgaWorkbench.peekDefinition",
-        "title": "速览定义（当前工程）",
+        "title": "速览本地定义与上层连接（当前工程）",
         "category": "FPGA"
       },
       {
         "command": "fpgaWorkbench.gotoDefinition",
-        "title": "转到定义（当前工程）",
+        "title": "转到定义与信号引用（当前工程）",
         "category": "FPGA"
       },
       {
@@ -175,6 +181,10 @@
         {
           "command": "fpgaWorkbench.projectInfo",
           "when": "view == fpgaWorkbench.files && fpgaWorkbench.loaded"
+        },
+        {
+          "command": "fpgaWorkbench.openFilelistSkill",
+          "when": "view == fpgaWorkbench.files"
         },
         {
           "command": "fpgaWorkbench.selectTop",

@@ -111,6 +111,19 @@ function candidateStubs(xci, xpr) {
   return unique(candidates);
 }
 
+function candidateNetlist(xci, xpr, designFileset) {
+  const root = path.dirname(xpr);
+  const stem = path.basename(xpr, path.extname(xpr));
+  const relative = path.relative(path.join(root, `${stem}.srcs`), xci);
+  const name = path.basename(xci, path.extname(xci));
+  // Preserve a known .srcs layout, including non-default design filesets.
+  // External IPs have no such mapping: report the conventional generated path
+  // as a candidate, never as proof that Vivado generated or selected it.
+  const directory = relative && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)
+    ? path.dirname(relative) : path.join(designFileset, 'ip', name);
+  return path.join(root, `${stem}.gen`, directory, `${name}_sim_netlist.v`);
+}
+
 /** Read a project without launching Vivado or modifying any project file. */
 async function loadProject(xprPath, options = {}) {
   const projectPath = path.resolve(xprPath);
@@ -179,13 +192,13 @@ async function loadProject(xprPath, options = {}) {
       const sourcePurpose = includeSimulation || ((!usedIn.length || usedIn.some(value => ['synthesis', 'implementation'].includes(value)))
         && !(attrs.get('usedinsynthesis') || []).some(falsehood));
       files.push({ path: resolved, rawPath, fileset: set.name, type: first(attrs, 'filetype', inferredType(rawPath)),
-        exists: false, enabled, usedIn, library: first(attrs, 'library', defaultLibrary), generated: false,
+        exists: false, existence: 'unknown', enabled, usedIn, library: first(attrs, 'library', defaultLibrary), generated: false,
         selected: selected.has(set.name) && sourcePurpose });
     }
   }
   await Promise.all(files.map(async file => {
     if (file.path) {
-      try { file.exists = await isFile(file.path); }
+      try { file.exists = await isFile(file.path); file.existence = file.exists ? 'exists' : 'missing'; }
       catch (error) { warnings.push(`无法检查文件 ${file.path}：${error.message}`); }
     }
     if (file.path && !file.exists && file.enabled && file.selected) warnings.push(`工程文件不存在：${file.path}`);
@@ -208,6 +221,32 @@ async function loadProject(xprPath, options = {}) {
         break; // One declaration per IP; never index the matching simulation netlist.
       }
     }
+  }
+  const designFileset = isDesign(main) ? main.name : sets.find(set => selected.has(set.name) && isDesign(set))?.name || 'sources_1';
+  const ipReferences = [];
+  const seenReferences = new Map();
+  for (const file of files) {
+    if (!file.selected || !file.enabled || path.extname(file.path || file.rawPath).toLowerCase() !== '.xci') continue;
+    const identity = file.path ? key(file.path) : `raw:${file.rawPath}`;
+    const previous = seenReferences.get(identity);
+    if (previous) {
+      previous.rawPaths = [...new Set([...previous.rawPaths, file.rawPath])];
+      previous.filesets = [...new Set([...previous.filesets, file.fileset])];
+      continue;
+    }
+    const reference = { path: file.path, rawPaths: [file.rawPath], filesets: [file.fileset],
+      existence: file.existence, netlistPath: null, netlistExistence: 'unknown', artifactPaths: [] };
+    if (file.path) {
+      const name = path.basename(file.path, path.extname(file.path));
+      reference.netlistPath = candidateNetlist(file.path, projectPath, designFileset);
+      reference.artifactPaths = unique([...candidateStubs(file.path, projectPath),
+        path.join(path.dirname(reference.netlistPath), `${name}_stub.v`), reference.netlistPath,
+        path.join(path.dirname(file.path), `${name}_sim_netlist.v`)]);
+      try { reference.netlistExistence = await isFile(reference.netlistPath) ? 'exists' : 'missing'; }
+      catch (error) { warnings.push(`无法检查 IP 仿真网表候选路径 ${reference.netlistPath}：${error.message}`); }
+    }
+    seenReferences.set(identity, reference);
+    ipReferences.push(reference);
   }
   const sourceFiles = unique(files.filter(file => file.enabled && file.selected && file.exists && HDL_EXTENSIONS.has(path.extname(file.path).toLowerCase())).map(file => file.path));
   const includeDirs = [];
@@ -234,26 +273,54 @@ async function loadProject(xprPath, options = {}) {
   }
   return { path: projectPath, root: path.dirname(projectPath), name: path.basename(projectPath, path.extname(projectPath)),
     part: first(config, 'part'), vivadoVersion: version, top: main.top,
-    filesets: sets.map(({ name, type, top }) => ({ name, type, top })), selectedFilesets: [...selected],
-    files, sourceFiles, includeDirs: unique(includeDirs), defines: [...new Set(defines)], warnings: [...new Set(warnings)] };
+    filesets: sets.map(({ name, type, top, props }) => ({ name, type, top, srcSets: [...(props.get('srcset') || [])] })), selectedFilesets: [...selected],
+    files, sourceFiles, ipReferences, includeSimulation,
+    includeDirs: unique(includeDirs), defines: [...new Set(defines)], warnings: [...new Set(warnings)] };
 }
 
-/** Paths-only source list. It is deliberately not advertised as Vivado compile order. */
-function filelist(project, baseDirectory) {
-  const lines = [
-    '// FPGA Workbench: static XPR source filelist; XPR order, NOT elaborated compile order.',
-    '// Verilog/SystemVerilog sources and headers only; generated IP stubs may be included.',
-    '// Include directories and macro definitions remain available in project status information.',
-    baseDirectory ? '// Paths relative to this filelist directory.' : '// Absolute source paths.',
-  ];
-  for (const file of project.sourceFiles) {
+/** Static source list with comment-only IP references; never a Vivado compile order. */
+function filelist(project, baseDirectory, options = {}) {
+  const comment = value => value === undefined || value === null || value === '' ? 'not recorded' : String(value).replace(/[\r\n\0]/g, ' ');
+  const slash = value => comment(value).replace(/\\/g, '/');
+  const displayPath = file => {
     const api = /^[a-z]:[\\/]/i.test(file) || /^\\\\/.test(file) ? path.win32 : path;
     let display = baseDirectory ? api.relative(api.resolve(baseDirectory), file) : file;
-    // Windows relative() returns an absolute path for different drives. Keep it
-    // explicit rather than fabricating a relative path that points elsewhere.
+    // Windows relative() keeps an absolute path when the drives differ.
     display = display.replace(/\\/g, '/');
     if (/[\r\n\0"]/.test(display)) throw new Error(`无法将路径写入单行 filelist：${JSON.stringify(display)}`);
-    lines.push(/[\s#]/.test(display) ? `"${display}"` : display);
+    return /[\s#]/.test(display) ? `"${display}"` : display;
+  };
+  const references = project.ipReferences || [];
+  const artifacts = new Set(references.flatMap(reference => reference.artifactPaths).filter(Boolean).map(key));
+  // Match only artifacts belonging to known XCIs. An unrelated user source
+  // named *_stub.v remains an ordinary source file.
+  for (const file of project.files || []) if (file.generated && file.origin && file.path) artifacts.add(key(file.path));
+  const sources = project.sourceFiles.filter(file => !artifacts.has(key(file)));
+  const lines = [
+    '// FPGA Workbench: static XPR source filelist; XPR order, NOT elaborated compile order.',
+    `// Output file: ${slash(options.outputPath)}`,
+    `// Project: ${comment(project.name)}`,
+    `// XPR: ${slash(project.path)}`,
+    `// Part: ${comment(project.part)}`,
+    `// XPR-recorded Vivado version: ${comment(project.vivadoVersion)} (not the installed tool version).`,
+    `// Exported at (ISO 8601 with timezone): ${comment(options.exportedAt || new Date().toISOString())}`,
+    `// Selected filesets: ${comment(project.selectedFilesets?.join(', '))}`,
+    `// Top: ${comment(options.top || project.top)}`,
+    `// Scope: enabled, selected, existing Verilog/SystemVerilog sources and headers; simulation indexing ${project.includeSimulation ? 'included' : 'excluded'}.`,
+    '// IP stubs and matching simulation netlists are excluded from active paths; XCI/netlist references below are comments only.',
+    '// Candidate netlist paths are inferred from XPR layout; existence does not establish generation, usage or compile order.',
+    `// Counts: active source paths ${sources.length}; XCI references ${references.length}.`,
+    '// Include directories and macro definitions remain available in project status information.',
+    baseDirectory ? '// Paths relative to this filelist directory.' : '// Absolute source paths.',
+    '',
+    '// ---------------- Active RTL sources and headers ----------------',
+  ];
+  for (const file of sources) lines.push(displayPath(file));
+  if (references.length) lines.push('', '// ---------------- IP references (comments only; checked when XPR was loaded) ----------------');
+  for (const reference of references) {
+    for (const raw of reference.rawPaths) lines.push(`// XCI original path: ${comment(raw)}`);
+    lines.push(`// XCI resolved [${comment(reference.existence)}]: ${reference.path ? displayPath(reference.path) : 'unresolved'}`);
+    lines.push(`// Simulation netlist candidate [${comment(reference.netlistExistence)}]: ${reference.netlistPath ? displayPath(reference.netlistPath) : 'unresolved'}`);
   }
   return `${lines.join('\n')}\n`;
 }
