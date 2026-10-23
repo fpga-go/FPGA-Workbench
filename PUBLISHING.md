@@ -19,6 +19,8 @@
 
 源码仓库：[fpga-go/FPGA-Workbench](https://github.com/fpga-go/FPGA-Workbench)。`package.json` 已填写对应的 repository、homepage 和 bugs 地址。
 
+本次版本为 **0.2.9 / Windows x64 / Pre-release**，来源分支 `feature`，源码标签为 `v0.2.9`。商店更新使用已核对的预发布 VSIX；普通信号着色、模块顶部固定与导航功能的验证范围见 [VERIFICATION.md](VERIFICATION.md)。
+
 发布前先核对[分支与版本维护规范](docs/RELEASING.md)。只有 `develop` 可以发布 Marketplace 正式版；`feature` 在 GitHub 和 Marketplace 均只能发布 Pre-release；`main` 暂不发布。GitHub Release 必须同时上传对应版本的 `.vsix` 和 SHA256 校验文件，自动生成的源码归档不能替代安装包。合并到 `develop` 须由用户在 GitHub 网页确认。
 
 ## 建立独立 Git 仓库

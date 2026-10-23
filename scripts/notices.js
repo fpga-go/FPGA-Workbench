@@ -15,4 +15,5 @@ function visit(name) {
   for(const dep of Object.keys(pkg.dependencies || {}))visit(dep);
 }
 visit('fast-xml-parser');
+notices.push('HDL syntax grammars:\n'+fs.readFileSync(path.join(root,'vendor/licenses/hdl-grammars.txt'),'utf8'));
 fs.writeFileSync(path.join(root,'THIRD_PARTY_NOTICES.txt'),notices.join('\n\n----------------------------------------\n\n'));

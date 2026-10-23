@@ -10,6 +10,6 @@ const skillRoot=path.join(__dirname,'../skills/fpga-workbench-filelist');
 fs.copyFileSync(path.join(__dirname,'../LICENSE.txt'),path.join(skillRoot,'LICENSE.txt'));
 const separator='\n\n----------------------------------------\n\n';
 const notices=fs.readFileSync(path.join(__dirname,'../THIRD_PARTY_NOTICES.txt'),'utf8')
-  .split(separator).filter(section=>!section.startsWith('Bundled slang-server:')).join(separator)
+  .split(separator).filter(section=>!section.startsWith('Bundled slang-server:') && !section.startsWith('HDL syntax grammars:')).join(separator)
   .replace('FPGA Workbench third-party notices','FPGA Workbench Filelist third-party notices');
 fs.writeFileSync(path.join(skillRoot,'THIRD_PARTY_NOTICES.txt'),notices);
