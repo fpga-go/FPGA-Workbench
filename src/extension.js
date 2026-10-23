@@ -3,6 +3,7 @@ const vscode = require('vscode');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const {loadProject, filelist} = require('./xpr');
+const {buildProjectTree} = require('./project-tree');
 const {HdlIndex} = require('./indexer');
 const {SlangBackend} = require('./slang');
 const {readSource} = require('./encoding');
@@ -20,6 +21,7 @@ class Workbench {
     this.members = new Set();
     this.watchers = [];
     this.revision = 0;
+    this.sourceRevision = 0;
     this.disposed = false;
     this.project = undefined;
     this.fileset = context.workspaceState.get('fileset');
@@ -42,6 +44,7 @@ class Workbench {
       vscode.workspace.onDidCloseTextDocument(d=>this.closedDocument(d)),
       vscode.workspace.onDidChangeConfiguration(e=> {if(e.affectsConfiguration('fpgaWorkbench')) this.scheduleRefresh();}),
       vscode.workspace.onDidChangeWorkspaceFolders(()=>this.change.fire()),
+      vscode.window.onDidChangeActiveTextEditor(()=>this.updateEditorContext()),
       vscode.languages.registerDefinitionProvider(selector,{provideDefinition:(d,p,t)=>this.definitions(d,p,t)}),
       vscode.languages.registerReferenceProvider(selector,{provideReferences:(d,p,c,t)=>this.references(d,p,c.includeDeclaration,t)}),
       vscode.languages.registerDocumentSymbolProvider(selector,{provideDocumentSymbols:d=>this.symbols(d)}),
@@ -129,6 +132,7 @@ class Workbench {
         this.project = project; this.index = index; this.texts = texts;
         this.members = new Set(project.sourceFiles.map(key));
         await vscode.commands.executeCommand('setContext','fpgaWorkbench.loaded',true);
+        await this.updateEditorContext();
         if(!current()) return false;
         this.change.fire();
         for(const warning of project.warnings) this.output.appendLine(warning);
@@ -151,10 +155,12 @@ class Workbench {
   }
   clearProjectView() {
     this.project = undefined;this.loadTarget = undefined;
+    ++this.sourceRevision;
     this.index = new HdlIndex();this.texts.clear();this.members.clear();
     this.status.text = '$(circuit-board) FPGA: 选择工程';this.status.tooltip = undefined;
     this.fileView.description = undefined;this.hierView.description = undefined;
     void vscode.commands.executeCommand('setContext','fpgaWorkbench.loaded',false);
+    void this.updateEditorContext();
     this.change.fire();
   }
   async closeProject() {
@@ -198,6 +204,7 @@ class Workbench {
       const w = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(dir,'*'));
       const change = (uri,type) => {
         if(!watchedKeys.has(key(uri.fsPath)) && !/\.(vh|svh)$/i.test(uri.fsPath)) return;
+        ++this.sourceRevision;
         this.backend.changed(uri,type);
         this.scheduleRefresh();
       };
@@ -206,14 +213,16 @@ class Workbench {
   }
   changedDocument(doc) {
     if(doc.uri.scheme !== 'file' || !this.members.has(key(doc.uri.fsPath))) return;
-    this.index.update(doc.uri.fsPath,doc.getText());this.texts.set(key(doc.uri.fsPath),doc.getText());
+    const text=doc.getText();
+    if(this.texts.get(key(doc.uri.fsPath))!==text)++this.sourceRevision;
+    this.index.update(doc.uri.fsPath,text);this.texts.set(key(doc.uri.fsPath),text);
     clearTimeout(this.treeTimer);this.treeTimer=setTimeout(()=>this.change.fire(),250);
   }
   async closedDocument(doc) {
     if(doc.uri.scheme !== 'file' || !this.members.has(key(doc.uri.fsPath))) return;
     const revision=this.revision;
-    try {const text=await readSource(doc.uri.fsPath,this.config().get('sourceEncoding','auto'));if(!this.isCurrent(revision))return;this.index.update(doc.uri.fsPath,text);this.texts.set(key(doc.uri.fsPath),text);this.change.fire();}
-    catch {if(!this.isCurrent(revision))return;this.index.remove(doc.uri.fsPath);this.texts.delete(key(doc.uri.fsPath));this.change.fire();}
+    try {const text=await readSource(doc.uri.fsPath,this.config().get('sourceEncoding','auto'));if(!this.isCurrent(revision))return;if(this.texts.get(key(doc.uri.fsPath))!==text)++this.sourceRevision;this.index.update(doc.uri.fsPath,text);this.texts.set(key(doc.uri.fsPath),text);this.change.fire();}
+    catch {if(!this.isCurrent(revision))return;++this.sourceRevision;this.index.remove(doc.uri.fsPath);this.texts.delete(key(doc.uri.fsPath));this.change.fire();}
   }
   fileChildren(node) {
     if(!this.project) return [];
@@ -222,25 +231,20 @@ class Workbench {
     const folder = vscode.workspace.workspaceFolders?.[0];
     const relative = folder ? slash(path.relative(folder.uri.fsPath,this.project.path)) : this.project.path;
     const root = this.node(this.project.name,{children:true,contextValue:'fpgaWorkbench.project',description:relative,tooltip:`XPR: ${this.project.path}\n工作区 → XPR: ${relative}`,icon:'circuit-board',items:[]});
-    for(const set of this.project.filesets) {
-      const files = this.project.files.filter(f=>f.fileset === set.name);
-      const setNode = this.node(set.name,{children:true,description:`${set.type} · ${files.length}`,icon:'library',items:[]});
-      const folders = new Map();
-      for(const f of files) {
-        const rel = f.path ? slash(path.relative(this.project.root,f.path)) : f.rawPath;
-        const group = path.posix.dirname(rel);
-        let parent = setNode;
-        if(group !== '.') {
-          if(!folders.has(group)) {const n=this.node(group,{children:true,icon:'folder',items:[]});folders.set(group,n);setNode.items.push(n);}
-          parent=folders.get(group);
-        }
-        const item = this.node(f.path ? path.basename(f.path) : f.rawPath,{description:!f.exists?'缺失':!f.enabled?'已禁用':f.generated?'IP 声明':undefined,tooltip:`${f.path || f.rawPath}\n文件集: ${set.name}\n${f.enabled?'启用':'禁用'}`,icon:!f.exists?'warning':!f.enabled?'circle-slash':'file-code'});
-        if(f.path) item.resourceUri=vscode.Uri.file(f.path);
-        if(f.exists) item.command={command:'vscode.open',title:'打开文件',arguments:[vscode.Uri.file(f.path)]};
-        parent.items.push(item);
-      }
-      root.items.push(setNode);
-    }
+    const render = entry => {
+      if(entry.kind !== 'file') return this.node(entry.label,{children:true,
+        description:entry.kind === 'fileset' ? `${entry.type} · ${entry.count}` : undefined,
+        icon:entry.kind === 'fileset' ? 'library' : 'folder',items:entry.children.map(render)});
+      const f=entry.file;
+      const origins=(entry.origins || [f]).map(source=>`${source.fileset}（${source.enabled?'启用':'禁用'}）`);
+      const item=this.node(entry.label,{description:!f.exists?'缺失':!f.enabled?'已禁用':f.generated?'IP 声明':undefined,
+        tooltip:`${f.path || f.rawPath}\n文件集: ${[...new Set(origins)].join('、')}`,
+        icon:!f.exists?'warning':!f.enabled?'circle-slash':'file-code'});
+      if(f.path) item.resourceUri=vscode.Uri.file(f.path);
+      if(f.exists && f.path) item.command={command:'vscode.open',title:'打开文件',arguments:[vscode.Uri.file(f.path)]};
+      return item;
+    };
+    root.items=buildProjectTree(this.project).map(render);
     return [root];
   }
   async hierChildren(node) {
@@ -275,19 +279,134 @@ class Workbench {
     return this.node(label,{module:m,ancestors:[...ancestors,id],children:!cyclic && m.instances.length>0,description:cyclic?'递归引用':path.basename(m.path),icon:'symbol-module',command:{command:'fpgaWorkbench.openLocation',title:'打开模块',arguments:[m]}});
   }
   position(text,offset) {const before=text.slice(0,offset);const line=before.split('\n').length-1;return new vscode.Position(line,offset-(before.lastIndexOf('\n')+1));}
+  offset(text,position) {
+    let offset=0;
+    for(let line=0;line<position.line;line++) {const end=text.indexOf('\n',offset);if(end<0)return text.length;offset=end+1;}
+    return Math.min(text.length,offset+position.character);
+  }
+  updateEditorContext() {
+    const doc=vscode.window.activeTextEditor?.document;
+    return vscode.commands.executeCommand('setContext','fpgaWorkbench.editorInProject',!!doc && doc.uri.scheme==='file' && this.members.has(key(doc.uri.fsPath)));
+  }
   location(loc) {
     const text=this.texts.get(key(loc.path)) || '';
     return new vscode.Location(vscode.Uri.file(loc.path),new vscode.Range(this.position(text,loc.start),this.position(text,loc.end)));
   }
-  async definitions(doc,pos,token) {
-    if(!this.members.has(key(doc.uri.fsPath))) return [];
-    const revision=this.revision;
+  uniqueLocations(items) {
+    return [...new Map(items.map(item=> {
+      const uri=item.targetUri || item.uri,range=item.targetSelectionRange || item.range || item.targetRange;
+      return [JSON.stringify([key(uri.fsPath),range.start.line,range.start.character,range.end.line,range.end.character]),item];
+    })).values()];
+  }
+  async definitions(doc,pos,token,options={}) {
+    if(options.localOnly)return this.definitionTargets(doc,pos,token,options);
+    if(doc.uri.scheme!=='file' || !this.members.has(key(doc.uri.fsPath)) || token?.isCancellationRequested)return [];
+    const revision=this.revision,text=doc.getText();
     this.changedDocument(doc);
+    const sources=this.sourceRevision;
+    const current=()=>this.isCurrent(revision) && this.sourceRevision===sources && !token?.isCancellationRequested && doc.getText()===text;
+    const locals=await this.definitionTargets(doc,pos,token);
+    if(!current())return [];
+    const query=this.index.localSignal(doc.uri.fsPath,doc.offsetAt(pos));
+    if(!query)return locals;
+    const matching=items=>this.uniqueLocations((items || []).filter(item=> {
+      const uri=item.targetUri || item.uri,range=item.targetSelectionRange || item.range || item.targetRange;
+      return uri?.scheme==='file' && range && key(uri.fsPath)===key(query.declaration.path)
+        && this.offset(text,range.start)===query.declaration.start && this.offset(text,range.end)===query.declaration.end;
+    }));
+    const signalLocals=matching(locals);
+    if(signalLocals.length!==1)return locals;
+    const parents=this.index.parentConnections(query.declaration.path,query.declaration.start,{target:'port'});
+    const results=[...signalLocals];
     if(this.backend.running) {
-      try {const results=await this.backend.definitions(doc,pos,token);return this.isCurrent(revision) ? results || [] : [];}
+      try {
+        // Declaration lookup is intentionally local even for inactive source.
+        // Extra signal uses must still be confirmed by the semantic service.
+        const atDeclaration=this.index.parentConnections(doc.uri.fsPath,doc.offsetAt(pos));
+        if(atDeclaration?.declaration.kind==='port') {
+          const confirmed=await this.backend.definitions(doc,pos,token);
+          if(!current())return [];
+          if(matching(confirmed).length!==1)return signalLocals;
+        }
+        const references=await this.backend.references(doc,pos,false,token);
+        if(!current())return [];
+        for(const item of references || []) {
+          const uri=item.targetUri || item.uri,range=item.targetSelectionRange || item.range || item.targetRange;
+          if(uri?.scheme!=='file' || !range || key(uri.fsPath)!==key(query.module.path))continue;
+          const start=this.offset(text,range.start),end=this.offset(text,range.end);
+          if(start>=query.module.bodyStart && end<=query.module.bodyEnd)results.push(item);
+        }
+        if(parents?.declaration.kind==='port') {
+          const connections=await this.backend.parentConnections(doc,this.position(text,query.declaration.start),parents,token,{target:'port'});
+          if(!current())return [];
+          results.push(...(connections || []));
+        }
+      } catch(e) {if(current())this.output.appendLine(`信号导航：${e.message}`);}
+    } else if(query.certain) {
+      results.push(...query.references.map(item=>this.location(item)));
+      if(parents?.declaration.kind==='port')results.push(...parents.connections.map(item=>this.location(item)));
+    }
+    return current() ? this.uniqueLocations(results) : [];
+  }
+  async definitionTargets(doc,pos,token,options={}) {
+    if(!this.members.has(key(doc.uri.fsPath)) || token?.isCancellationRequested) return [];
+    const revision=this.revision;
+    const text=doc.getText();
+    this.changedDocument(doc);
+    const sources=this.sourceRevision;
+    const current=()=>this.isCurrent(revision) && this.sourceRevision===sources && !token?.isCancellationRequested && doc.getText()===text;
+    const parents=this.index.parentConnections(doc.uri.fsPath,doc.offsetAt(pos));
+    // A port declaration is also a useful local preview target. Do not replace
+    // it with its callers; parent-side connections belong to the peek list.
+    if(parents && (parents.declaration.kind==='port' || options.localOnly))return [this.location(parents.declaration)];
+    if(this.backend.running) {
+      try {
+        if(parents) {
+          const results=await this.backend.parentConnections(doc,pos,parents,token);
+          if(!current())return [];
+          if(results?.length)return results;
+        }
+        const results=await this.backend.definitions(doc,pos,token);
+        return current() ? results || [] : [];
+      }
       catch(e) {if(this.isCurrent(revision))this.output.appendLine(`定义查询：${e.message}`);return [];}
     }
+    if(parents?.connections.length)return parents.connections.map(l=>this.location(l));
     return this.index.definitions(doc.uri.fsPath,doc.offsetAt(pos)).map(l=>this.location(l));
+  }
+  async peekDefinitions(doc,pos,token) {
+    if(doc.uri.scheme!=='file' || !this.members.has(key(doc.uri.fsPath)) || token?.isCancellationRequested)return [];
+    const revision=this.revision,text=doc.getText();
+    this.changedDocument(doc);
+    const sources=this.sourceRevision;
+    const current=()=>this.isCurrent(revision) && this.sourceRevision===sources && !token?.isCancellationRequested && doc.getText()===text;
+    const locals=await this.definitionTargets(doc,pos,token,{localOnly:true});
+    if(!current())return [];
+    const results=[...locals],seen=new Set();
+    for(const local of locals) {
+      const uri=local.targetUri || local.uri,range=local.targetSelectionRange || local.range || local.targetRange;
+      if(uri?.scheme!=='file' || !range || !this.members.has(key(uri.fsPath)))continue;
+      const source=this.texts.get(key(uri.fsPath));if(source===undefined)continue;
+      const query=this.index.parentConnections(uri.fsPath,this.offset(source,range.start));
+      if(!query || query.declaration.kind!=='port')continue;
+      const identity=`${key(uri.fsPath)}:${query.declaration.start}`;
+      if(seen.has(identity))continue;seen.add(identity);
+      if(this.backend.running) {
+        try {
+          const opened=vscode.workspace.textDocuments.find(item=>item.uri.scheme==='file' && key(item.uri.fsPath)===key(uri.fsPath));
+          const document=opened || {uri,getText:()=>source};
+          const parents=await this.backend.parentConnections(document,this.position(source,query.declaration.start),query,token,{target:'expression'});
+          if(!current())return [];
+          if(this.texts.get(key(uri.fsPath))!==source)return [];
+          results.push(...(parents || []));
+        } catch(e) {if(current())this.output.appendLine(`连接速览：${e.message}`);}
+      } else {
+        const parents=this.index.parentConnections(uri.fsPath,query.declaration.start,{target:'expression'});
+        results.push(...(parents?.connections || []).map(item=>this.location(item)));
+      }
+    }
+    if(!current())return [];
+    return this.uniqueLocations(results);
   }
   async references(doc,pos,includeDeclaration,token) {
     if(!this.members.has(key(doc.uri.fsPath))) return [];
@@ -306,10 +425,18 @@ class Workbench {
   }
   async navigate(peek) {
     const editor=vscode.window.activeTextEditor;if(!editor) return;
-    const locations=await this.definitions(editor.document,editor.selection.active,new vscode.CancellationTokenSource().token);
+    if(peek && (editor.document.uri.scheme!=='file' || !this.members.has(key(editor.document.uri.fsPath))))return vscode.commands.executeCommand('editor.action.peekDefinition');
+    const revision=this.revision,text=editor.document.getText(),position=editor.selection.active;
+    const cancellation=new vscode.CancellationTokenSource();
+    let locations;
+    try {locations=await (peek ? this.peekDefinitions(editor.document,position,cancellation.token) : this.definitions(editor.document,position,cancellation.token));}
+    finally {cancellation.dispose();}
+    if(!this.isCurrent(revision) || vscode.window.activeTextEditor!==editor || editor.document.getText()!==text || editor.selection.active.line!==position.line || editor.selection.active.character!==position.character)return;
     const targets=(locations || []).map(l=>l.targetUri ? new vscode.Location(l.targetUri,l.targetSelectionRange || l.targetRange):l);
     if(!targets.length) {vscode.window.showInformationMessage('当前工程中没有找到定义。请检查文件集、宏定义和 include 路径。');return;}
-    await vscode.commands.executeCommand('editor.action.goToLocations',editor.document.uri,editor.selection.active,targets,peek?'peek':'goto','未找到定义',peek);
+    const signal=this.index.localSignal(editor.document.uri.fsPath,editor.document.offsetAt(position));
+    const showPeek=peek || !!signal;
+    await vscode.commands.executeCommand('editor.action.goToLocations',editor.document.uri,position,targets,showPeek?'peek':'goto','未找到定义',showPeek);
   }
   async findReferences() {
     const editor=vscode.window.activeTextEditor;if(!editor)return;
@@ -338,10 +465,17 @@ class Workbench {
     const revision=this.revision;
     const uri=await vscode.window.showSaveDialog({title:'导出工程源文件清单',defaultUri:vscode.Uri.file(path.join(this.project.root,`${this.project.name}-sources.f`)),filters:{Filelist:['f']}});
     if(!uri || !this.isCurrent(revision))return;
-    const protectedKeys=new Set([this.project.path,...this.project.files.map(f=>f.path).filter(Boolean)].map(key));
+    const ipInputs=(this.project.ipReferences || []).flatMap(ip=>[ip.path,...(ip.artifactPaths || [])]).filter(Boolean);
+    const protectedKeys=new Set([this.project.path,...this.project.files.map(f=>f.path).filter(Boolean),...ipInputs].map(key));
     if(protectedKeys.has(key(uri.fsPath)))throw new Error('导出路径指向工程输入文件，请选择其他文件名。');
-    await vscode.workspace.fs.writeFile(uri,Buffer.from(filelist(this.project,path.dirname(uri.fsPath)),'utf8'));
+    await vscode.workspace.fs.writeFile(uri,Buffer.from(filelist(this.project,path.dirname(uri.fsPath),{outputPath:uri.fsPath,top:this.top || this.project.top}),'utf8'));
     await vscode.window.showTextDocument(uri);
+  }
+  async openFilelistSkill() {
+    const uri=vscode.Uri.file(path.join(this.context.extensionPath,'skills','fpga-workbench-filelist','SKILL.md'));
+    this.output.appendLine(`Filelist Skill: ${uri.fsPath}`);
+    await vscode.window.showTextDocument(uri,{preview:false});
+    return uri;
   }
   async info() {
     if(!this.project) return this.selectProject();
@@ -363,7 +497,7 @@ class Workbench {
 
 function activate(context) {
   const app = new Workbench(context);active=app;
-  const commands={selectProject:u=>app.selectProject(u),switchProject:u=>app.selectProject(typeof u === 'string' || (u?.scheme === 'file' && typeof u.fsPath === 'string') ? u : undefined),closeProject:()=>app.closeProject(),refresh:()=>app.refresh(),selectFileset:()=>app.chooseFileset(),selectTop:()=>app.chooseTop(),exportFilelist:()=>app.exportFilelist(),projectInfo:()=>app.info(),peekDefinition:()=>app.navigate(true),gotoDefinition:()=>app.navigate(false),parentConnections:()=>app.findReferences(),openLocation:l=>app.openLocation(l),openHierarchy:p=>app.backend.showHierarchy(p)};
+  const commands={selectProject:u=>app.selectProject(u),switchProject:u=>app.selectProject(typeof u === 'string' || (u?.scheme === 'file' && typeof u.fsPath === 'string') ? u : undefined),closeProject:()=>app.closeProject(),refresh:()=>app.refresh(),selectFileset:()=>app.chooseFileset(),selectTop:()=>app.chooseTop(),exportFilelist:()=>app.exportFilelist(),openFilelistSkill:()=>app.openFilelistSkill(),projectInfo:()=>app.info(),peekDefinition:()=>app.navigate(true),gotoDefinition:()=>app.navigate(false),parentConnections:()=>app.findReferences(),openLocation:l=>app.openLocation(l),openHierarchy:p=>app.backend.showHierarchy(p)};
   for(const [name,handler] of Object.entries(commands)) context.subscriptions.push(vscode.commands.registerCommand(`fpgaWorkbench.${name}`,async(...args)=>{try{return await handler(...args);}catch(e){app.report(e);}}));
   void app.restore().catch(e=>app.report(e));
   return {workbench:app};
