@@ -29,8 +29,8 @@
 
 当前安装包面向 **Windows x64 / VS Code 1.96+**，自带 slang-server，无需另装语言服务。定义跳转面向 **Verilog / SystemVerilog**；综合、实现、仿真和硬件下载继续使用 FPGA 工具链。
 
-加密 IP、未生成的 HDL、缺失 include 或器件库可能影响导航。更多设置与限制见[使用说明](https://github.com/fpga-go/FPGA-Workbench/blob/v0.2.10/docs/USAGE.md)。
+加密 IP、未生成的 HDL、缺失 include 或器件库可能影响导航。更多设置与限制见[使用说明](https://github.com/fpga-go/FPGA-Workbench/blob/v0.2.11/docs/USAGE.md)。
 
-作者 **fpga-go** · 原始代码 **MIT** · [第三方许可](https://github.com/fpga-go/FPGA-Workbench/blob/v0.2.10/THIRD_PARTY_NOTICES.txt)
+作者 **fpga-go** · 原始代码 **MIT** · [第三方许可](https://github.com/fpga-go/FPGA-Workbench/blob/v0.2.11/THIRD_PARTY_NOTICES.txt)
 
 [仓库](https://github.com/fpga-go/FPGA-Workbench) · [问题](https://github.com/fpga-go/FPGA-Workbench/issues) · [许可证](https://github.com/fpga-go/FPGA-Workbench/blob/main/LICENSE.txt) · [主页](https://github.com/fpga-go/FPGA-Workbench/tree/develop#readme) · [市场](https://marketplace.visualstudio.com/items?itemName=fpga-go.fpga-workbench)
