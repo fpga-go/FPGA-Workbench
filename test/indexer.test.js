@@ -466,3 +466,39 @@ test('conditional and macro local metadata remains conservative and does not pic
   index.update('top.sv', macroText);
   assert.equal(index.localSignal('top.sv', macroText.indexOf('clk')).certain, false);
 });
+
+test('module body ranges cover their own endmodule and do not end at comments, strings, or escaped keyword identifiers', () => {
+  const text = '// module comment_only; endmodule\r\n' +
+    '`define FAKE module macro_only; endmodule\r\n' +
+    'module first(input clk);\r\n' +
+    '  wire \\endmodule ; initial $display("endmodule module string_only;");\r\n' +
+    '  /* endmodule */ wire inside;\r\n' +
+    'endmodule : first\r\n' +
+    '/* module hidden; endmodule */\r\n' +
+    'module second;\r\n  wire data;\r\nendmodule\r\n';
+  const { index } = setup({ 'ranges.sv': text });
+  const modules = index.modules();
+  assert.deepEqual(modules.map(mod => mod.name), ['first', 'second']);
+  for (const mod of modules) {
+    assert.equal(text.slice(mod.bodyStart, mod.bodyStart + 6), 'module');
+    assert.equal(text.slice(mod.bodyEnd - 9, mod.bodyEnd), 'endmodule');
+    assert.equal(text.slice(mod.start, mod.end), mod.name);
+    assert.ok(mod.start >= mod.bodyStart && mod.end <= mod.bodyEnd);
+  }
+  assert.equal(modules[0].bodyEnd, text.indexOf('endmodule : first') + 9);
+  assert.ok(modules[0].bodyEnd < modules[1].bodyStart);
+  assert.equal(modules[1].bodyEnd, text.lastIndexOf('endmodule') + 9);
+});
+
+test('an unfinished module uses the current source end and updates when its closing keyword is restored', () => {
+  const text = 'module editing(input clk);\n  wire data;\n';
+  const { index } = setup({ 'editing.sv': text });
+  const unfinished = index.modules()[0];
+  assert.equal(unfinished.bodyStart, 0);
+  assert.equal(unfinished.bodyEnd, text.length);
+  const completed = `${text}endmodule\nmodule next; endmodule\n`;
+  index.update('editing.sv', completed);
+  assert.equal(index.modules().length, 2);
+  assert.equal(index.modules()[0].bodyEnd, text.length + 9);
+  assert.ok(index.modules()[0].bodyEnd < index.modules()[1].bodyStart);
+});

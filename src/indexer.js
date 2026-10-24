@@ -69,11 +69,12 @@ function tokenize(text) {
       continue;
     }
     let kind = 'punctuation';
+    let escaped = false;
     let value;
     if (ch === '\\') {
       i++;
       while (i < text.length && !/\s/.test(text[i])) i++;
-      value = text.slice(start + 1, i); kind = 'identifier';
+      value = text.slice(start + 1, i); kind = 'identifier'; escaped = true;
     } else if (/[A-Za-z_$]/.test(ch)) {
       i++;
       while (i < text.length && /[A-Za-z0-9_$]/.test(text[i])) i++;
@@ -85,7 +86,7 @@ function tokenize(text) {
     } else if (text.startsWith('::', i)) {
       i += 2; value = '::';
     } else { i++; value = ch; }
-    tokens.push({ value, start, end: i, kind, conditional: conditionalDepth > 0 });
+    tokens.push({ value, start, end: i, kind, conditional: conditionalDepth > 0, ...(escaped ? { escaped: true } : {}) });
   }
   return { tokens, hasDirectives };
 }
@@ -337,13 +338,13 @@ function parseFile(path, text) {
   const { tokens, hasDirectives } = tokenize(text);
   const file = { path, text, tokens, hasDirectives, pairs: matchingPairs(tokens), modules: [] };
   for (let i = 0; i < tokens.length; i++) {
-    if (tokens[i].value !== 'module') continue;
+    if (tokens[i].value !== 'module' || tokens[i].escaped) continue;
     let name = i + 1;
     if (['automatic', 'static'].includes(tokens[name]?.value)) name++;
     if (tokens[name]?.kind !== 'identifier') continue;
     const headerEnd = statementEnd(tokens, file.pairs, name + 1, tokens.length);
     let end = headerEnd + 1;
-    while (end < tokens.length && tokens[end].value !== 'endmodule') end++;
+    while (end < tokens.length && (tokens[end].value !== 'endmodule' || tokens[end].escaped)) end++;
     file.modules.push(parseModule(file, i, name, headerEnd, end));
     i = end;
   }

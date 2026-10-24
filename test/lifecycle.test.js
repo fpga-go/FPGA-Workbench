@@ -31,6 +31,7 @@ function harness(t) {
   const h = {
     state: new Map(), contexts: new Map(), commands: new Map(), watchers: [], timers: new Map(),
     loadCalls: [], starts: [], backendEvents: [], logs: [], errors: [], timerId: 0, filelistCalls: [], executions: [],
+    symbolRegistrations: [], symbolEvents: [],
   };
   const disposable = () => ({ disposed: false, dispose() { this.disposed = true; } });
   const uri = file => ({ scheme: 'file', fsPath: path.resolve(file), toString() { return pathToFileURL(this.fsPath).href; } });
@@ -86,7 +87,13 @@ function harness(t) {
     Position: class { constructor(line, character) { this.line = line; this.character = character; } },
     Range: class { constructor(start, end) { this.start = start; this.end = end; } },
     Location: class { constructor(locationUri, range) { this.uri = locationUri; this.range = range; } },
-    SymbolInformation: class {}, SymbolKind: { Module: 2 },
+    SymbolInformation: class {},
+    DocumentSymbol: class {
+      constructor(name, detail, kind, range, selectionRange) {
+        Object.assign(this, { name, detail, kind, range, selectionRange, children: [] });
+      }
+    },
+    SymbolKind: { Module: 2 },
     CancellationTokenSource: class { constructor() { this.token = { isCancellationRequested: false }; } dispose() {} },
     RelativePattern: class { constructor(base, pattern) { this.base = base; this.pattern = pattern; } },
     TreeItemCollapsibleState: { None: 0, Collapsed: 1 }, StatusBarAlignment: { Left: 1 },
@@ -125,7 +132,15 @@ function harness(t) {
     languages: {
       registerDefinitionProvider: disposable,
       registerReferenceProvider: disposable,
-      registerDocumentSymbolProvider: disposable,
+      registerDocumentSymbolProvider: (selector, provider) => {
+        h.symbolSelector = selector; h.symbolProvider = provider;
+        const registration = { selector, provider, disposed: false, dispose() {
+          if (this.disposed) return;
+          this.disposed = true; h.symbolEvents.push({ type: 'dispose', provider });
+        } };
+        h.symbolRegistrations.push(registration); h.symbolEvents.push({ type: 'register', provider });
+        return registration;
+      },
     },
     commands: {
       registerCommand: (name, callback) => { h.commands.set(name, callback); return disposable(); },
@@ -159,6 +174,7 @@ function harness(t) {
   h.app = module.exports.activate(context).workbench;
   h.vscode = vscode; h.context = context; h.events = events;
   h.liveWatchers = () => h.watchers.filter(watcher => !watcher.disposed);
+  h.liveSymbols = () => h.symbolRegistrations.filter(registration => !registration.disposed);
   h.moduleNames = () => h.app.index.modules().map(item => item.name).sort().join(',');
   t.after(async () => {
     await h.app.dispose();
@@ -175,11 +191,141 @@ function assertClosed(h) {
   assert.equal(h.app.index.modules().length, 0);
   assert.equal(h.app.backend.running, false);
   assert.equal(h.liveWatchers().length, 0);
+  assert.equal(h.liveSymbols().length, 0);
   assert.equal(h.app.fileChildren().length, 0);
   assert.equal(h.contexts.get('fpgaWorkbench.loaded'), false);
   assert.equal(h.contexts.get('fpgaWorkbench.hasProject'), false);
   for (const name of ['project', 'fileset', 'top']) assert.equal(h.state.has(name), false, `${name} must not be restored`);
 }
+
+test('document symbols supply complete independent module ranges and name selections for native Sticky Scroll', timeout, async t => {
+  const h = harness(t);
+  const originalText = h.text;
+  const source = '// module fake_comment; endmodule\r\n' +
+    'module first #(parameter W=8)(input clk);\r\n' +
+    '  initial $display("module fake_string; endmodule");\r\n' +
+    '  /* endmodule */ wire data;\r\n' +
+    'endmodule\r\n' +
+    'module second(\r\n  input clk\r\n);\r\nendmodule\r\n';
+  h.text = name => name === 'A' ? source : originalText(name);
+  await h.app.selectProject(h.xpr('A'));
+  const document = h.document('A');
+  const symbols = h.symbolProvider.provideDocumentSymbols(document, { isCancellationRequested: false });
+  assert.deepEqual(Array.from(symbols, symbol => symbol.name), ['first', 'second']);
+  for (const symbol of symbols) {
+    assert.ok(symbol instanceof h.vscode.DocumentSymbol);
+    assert.equal(symbol.kind, h.vscode.SymbolKind.Module);
+    const start = h.app.offset(source, symbol.range.start), end = h.app.offset(source, symbol.range.end);
+    const selectedStart = h.app.offset(source, symbol.selectionRange.start), selectedEnd = h.app.offset(source, symbol.selectionRange.end);
+    assert.equal(source.slice(start, start + 6), 'module');
+    assert.equal(source.slice(end - 9, end), 'endmodule');
+    assert.equal(source.slice(selectedStart, selectedEnd), symbol.name);
+    assert.ok(selectedStart >= start && selectedEnd <= end);
+    assert.equal(symbol.children.length, 0);
+  }
+  assert.equal(h.app.offset(source, symbols[0].range.end), source.indexOf('\r\nendmodule') + 2 + 9);
+  assert.ok(h.app.offset(source, symbols[0].range.end) < h.app.offset(source, symbols[1].range.start));
+  assert.ok(symbols[0].range.end.line > symbols[0].selectionRange.end.line);
+});
+
+test('module symbol ranges follow unsaved edits and unfinished module text without reading or rewriting disk', timeout, async t => {
+  const h = harness(t);
+  await h.app.selectProject(h.xpr('A'));
+  let source = h.text('A');
+  const document = { ...h.document('A'), getText: () => source };
+  let reads = 0;
+  h.read = async () => { reads++; throw new Error('Symbol requests must use the editor text'); };
+  const first = h.symbolProvider.provideDocumentSymbols(document)[0];
+  source = '// unsaved heading\nmodule changed(input clk);\n  wire first;\n  wire second;\n';
+  h.events.change.fire({ document });
+  const editing = h.symbolProvider.provideDocumentSymbols(document)[0];
+  assert.equal(editing.name, 'changed');
+  assert.equal(editing.range.start.line, 1);
+  assert.equal(h.app.offset(source, editing.range.end), source.length);
+  assert.ok(editing.range.end.line > first.range.end.line);
+  source += 'endmodule\nmodule added;\nendmodule\n';
+  const completed = h.symbolProvider.provideDocumentSymbols(document);
+  assert.deepEqual(Array.from(completed, symbol => symbol.name), ['changed', 'added']);
+  assert.equal(h.app.offset(source, completed[0].range.end), source.indexOf('endmodule') + 9);
+  assert.equal(reads, 0);
+});
+
+test('document symbol provider respects cancellation, file membership, project switch, close, and disposal', timeout, async t => {
+  const h = harness(t);
+  await h.app.selectProject(h.xpr('A'));
+  const a = h.document('A');
+  assert.equal(h.symbolProvider.provideDocumentSymbols(a).length, 1);
+  assert.equal(h.symbolProvider.provideDocumentSymbols(h.document('outside')).length, 0);
+  assert.equal(h.symbolProvider.provideDocumentSymbols({ ...a, uri: { ...a.uri, scheme: 'untitled' } }).length, 0);
+  const cancelled = { ...a, getText: () => { throw new Error('Cancelled provider request read source text'); } };
+  assert.equal(h.symbolProvider.provideDocumentSymbols(cancelled, { isCancellationRequested: true }).length, 0);
+  await h.app.selectProject(h.xpr('B'));
+  assert.equal(h.symbolProvider.provideDocumentSymbols(a).length, 0);
+  assert.equal(h.symbolProvider.provideDocumentSymbols(h.document('B'))[0].name, 'B_top');
+  await h.app.closeProject();
+  assert.equal(h.symbolProvider.provideDocumentSymbols(h.document('B')).length, 0);
+  await h.app.selectProject(h.xpr('C'));
+  await h.app.dispose();
+  assert.equal(h.symbolProvider.provideDocumentSymbols(h.document('C')).length, 0);
+});
+
+test('document symbol registration changes identity on refresh and switch and releases on close and context disposal', timeout, async t => {
+  const h = harness(t);
+  assert.equal(h.liveSymbols().length, 0, 'no project must not advertise document symbols');
+  assert.equal(h.symbolEvents.length, 0);
+  const subscriptions = h.context.subscriptions.length;
+  await h.app.selectProject(h.xpr('A'));
+  const first = h.symbolProvider;
+  assert.equal(h.liveSymbols().length, 1);
+  assert.equal(first.provideDocumentSymbols(h.document('A'))[0].name, 'A_top');
+  await h.app.refresh();
+  const refreshed = h.symbolProvider;
+  assert.notEqual(refreshed, first);
+  assert.equal(first.provideDocumentSymbols(h.document('A')).length, 0, 'disposed identity must not serve a later generation');
+  assert.equal(h.liveSymbols().length, 1);
+  await h.app.selectProject(h.xpr('B'));
+  const switched = h.symbolProvider;
+  assert.notEqual(switched, refreshed);
+  assert.equal(refreshed.provideDocumentSymbols(h.document('B')).length, 0);
+  assert.equal(switched.provideDocumentSymbols(h.document('B'))[0].name, 'B_top');
+  assert.deepEqual(h.symbolEvents.map(event => event.type), ['register', 'dispose', 'register', 'dispose', 'register']);
+  await h.app.closeProject();
+  assert.equal(h.liveSymbols().length, 0);
+  await h.app.selectProject(h.xpr('C'));
+  assert.notEqual(h.symbolProvider, switched);
+  assert.equal(h.liveSymbols().length, 1);
+  assert.equal(h.context.subscriptions.length, subscriptions, 'reloads must not accumulate subscription handles');
+  for (const subscription of h.context.subscriptions) subscription.dispose();
+  await h.app.loading;
+  assert.equal(h.liveSymbols().length, 0);
+  assert.equal(h.app.disposed, true);
+  assert.equal(h.symbolEvents.at(-1).type, 'dispose');
+});
+
+test('document symbol registry is empty while loading and cancelled or failed loads cannot publish stale providers', timeout, async t => {
+  const h = harness(t), entered = deferred(), release = deferred();
+  await h.app.selectProject(h.xpr('A'));
+  const first = h.symbolProvider;
+  h.load = async xpr => { entered.resolve(); await release.promise; return h.makeProject(xpr); };
+  const selecting = h.app.selectProject(h.xpr('B'));
+  assert.equal(h.liveSymbols().length, 0, 'starting a load must invalidate the old registry immediately');
+  await entered.promise;
+  assert.equal(first.provideDocumentSymbols(h.document('A')).length, 0);
+  const closing = h.app.closeProject();
+  release.resolve();
+  await Promise.all([selecting, closing]);
+  assert.equal(h.symbolRegistrations.length, 1, 'cancelled generation must never register');
+  assertClosed(h);
+  h.load = async () => { throw new Error('Synthetic malformed XPR'); };
+  await assert.rejects(h.app.selectProject(h.xpr('C')), /Synthetic malformed XPR/);
+  assert.equal(h.liveSymbols().length, 0);
+  assert.equal(h.symbolRegistrations.length, 1);
+  h.load = async xpr => h.makeProject(xpr);
+  await h.app.refresh();
+  assert.equal(h.liveSymbols().length, 1);
+  assert.notEqual(h.symbolProvider, first);
+  assert.equal(h.symbolProvider.provideDocumentSymbols(h.document('C'))[0].name, 'C_top');
+});
 
 test('project switch replaces source membership, watchers, backend ownership, and saved project', timeout, async t => {
   const h = harness(t);
@@ -299,6 +445,8 @@ test('rapid A to B to C selections discard queued stale loads and keep only C', 
   assert.equal(h.moduleNames(), 'C_top');
   assert.deepEqual(h.starts, ['C']);
   assert.deepEqual(h.loadCalls, [h.xpr('A'), h.xpr('C')]);
+  assert.equal(h.symbolRegistrations.length, 1, 'only the committed generation may register symbols');
+  assert.equal(h.liveSymbols().length, 1);
   assert.equal(h.state.get('project').absolutePath, h.xpr('C'));
   assert.ok(h.liveWatchers().every(watcher => watcher.pattern.base === path.dirname(h.xpr('C'))));
 });
@@ -696,6 +844,7 @@ test('failed XPR selection clears the view and remains retryable and closable', 
   assert.equal(h.app.index.modules().length, 0);
   assert.equal(h.liveWatchers().length, 0);
   assert.equal(h.app.backend.running, false);
+  assert.equal(h.liveSymbols().length, 0);
   assert.match(h.app.status.text, /读取失败/);
   assert.equal(h.contexts.get('fpgaWorkbench.hasProject'), true);
   h.load = async xpr => h.makeProject(xpr);
@@ -716,6 +865,7 @@ test('dispose during startup cannot revive the backend or accept a later load', 
   assert.equal(h.app.disposed, true);
   assert.equal(h.app.backend.running, false);
   assert.equal(h.liveWatchers().length, 0);
+  assert.equal(h.liveSymbols().length, 0);
   assert.equal(h.state.has('project'), false);
   assert.equal(await h.app.load(h.xpr('B')), false);
   assert.deepEqual(h.starts, ['A']);
