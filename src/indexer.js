@@ -69,11 +69,12 @@ function tokenize(text) {
       continue;
     }
     let kind = 'punctuation';
+    let escaped = false;
     let value;
     if (ch === '\\') {
       i++;
       while (i < text.length && !/\s/.test(text[i])) i++;
-      value = text.slice(start + 1, i); kind = 'identifier';
+      value = text.slice(start + 1, i); kind = 'identifier'; escaped = true;
     } else if (/[A-Za-z_$]/.test(ch)) {
       i++;
       while (i < text.length && /[A-Za-z0-9_$]/.test(text[i])) i++;
@@ -85,7 +86,7 @@ function tokenize(text) {
     } else if (text.startsWith('::', i)) {
       i += 2; value = '::';
     } else { i++; value = ch; }
-    tokens.push({ value, start, end: i, kind, conditional: conditionalDepth > 0 });
+    tokens.push({ value, start, end: i, kind, conditional: conditionalDepth > 0, ...(escaped ? { escaped: true } : {}) });
   }
   return { tokens, hasDirectives };
 }
@@ -173,7 +174,7 @@ function parseModule(file, moduleStart, nameIndex, headerEnd, moduleEnd) {
   const mod = {
     ...location(file.path, nameToken, 'module'), bodyStart: tokens[moduleStart].start,
     bodyEnd: tokens[moduleEnd]?.end ?? file.text.length, instances: [], symbols: [], warnings: [],
-    conditional: !!nameToken.conditional, file, scopes: [], tokenScopes: new Map(), excluded: new Set()
+    conditional: !!nameToken.conditional, file, scopes: [], tokenScopes: new Map(), excluded: new Set(), portAliases: []
   };
   const root = newScope(mod, null, tokens[moduleStart], 'module', mod.name);
   let i = nameIndex + 1;
@@ -184,6 +185,7 @@ function parseModule(file, moduleStart, nameIndex, headerEnd, moduleEnd) {
     const end = pairs.get(i);
     const ansi = tokens.slice(i + 1, end).some(t => DIRECTIONS.has(t.value));
     declarations(mod, root, i + 1, end, 'port', !ansi);
+    if (!ansi) mod.portAliases = root.symbols.filter(symbol => symbol.kind === 'port').map(symbol => ({ ...symbol }));
   }
   for (let n = moduleStart; n <= headerEnd; n++) mod.tokenScopes.set(n, root);
   const stack = [root];
@@ -261,9 +263,44 @@ function namedConnections(mod, start, end, kind) {
   for (const [from, to] of split(tokens, pairs, start, end)) {
     if (tokens[from]?.value !== '.' || tokens[from + 1]?.kind !== 'identifier') continue;
     const name = tokens[from + 1];
-    result.push({ ...location(mod.path, name, kind), expressionStart: tokens[from + 2]?.end ?? name.end, expressionEnd: tokens[to - 1]?.start ?? name.end, implicit: tokens[from + 2]?.value !== '(' });
+    result.push({ ...location(mod.path, name, kind), conditional: !!name.conditional, expressionStart: tokens[from + 2]?.end ?? name.end, expressionEnd: tokens[to - 1]?.start ?? name.end, implicit: tokens[from + 2]?.value !== '(' });
   }
   return result;
+}
+
+/** Return one complete parent-side expression, without expanding source text.
+ * Empty connections and unresolved macro / preprocessor expressions have no
+ * safe expression target. An implicit .port uses the port token itself.
+ */
+function connectionExpression(text, port) {
+  if (typeof text !== 'string' || !port || port.conditional) return undefined;
+  if (port.implicit) {
+    if (!Number.isInteger(port.start) || !Number.isInteger(port.end) || port.start < 0 || port.end <= port.start || port.end > text.length) return undefined;
+    // A macro or directive after the name can change the connection syntax;
+    // only whitespace/comments followed by the actual delimiter are implicit.
+    let cursor = port.end;
+    while (cursor < text.length) {
+      if (/\s/.test(text[cursor])) { cursor++; continue; }
+      if (text.startsWith('//', cursor)) {
+        const end = text.indexOf('\n', cursor + 2);
+        if (end < 0) return undefined;
+        cursor = end + 1; continue;
+      }
+      if (text.startsWith('/*', cursor)) {
+        const end = text.indexOf('*/', cursor + 2);
+        if (end < 0) return undefined;
+        cursor = end + 2; continue;
+      }
+      return [',', ')'].includes(text[cursor]) ? { ...port } : undefined;
+    }
+    return undefined;
+  }
+  const start = port.expressionStart, end = port.expressionEnd;
+  if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end < start || end > text.length) return undefined;
+  if (text[start - 1] !== '(' || text[end] !== ')') return undefined;
+  const { tokens, hasDirectives } = tokenize(text.slice(start, end));
+  if (!tokens.length || hasDirectives || tokens.some(token => token.kind === 'macro' || token.conditional)) return undefined;
+  return { ...port, start: start + tokens[0].start, end: start + tokens.at(-1).end };
 }
 
 function parseInstances(mod, scope, start, limit) {
@@ -301,13 +338,13 @@ function parseFile(path, text) {
   const { tokens, hasDirectives } = tokenize(text);
   const file = { path, text, tokens, hasDirectives, pairs: matchingPairs(tokens), modules: [] };
   for (let i = 0; i < tokens.length; i++) {
-    if (tokens[i].value !== 'module') continue;
+    if (tokens[i].value !== 'module' || tokens[i].escaped) continue;
     let name = i + 1;
     if (['automatic', 'static'].includes(tokens[name]?.value)) name++;
     if (tokens[name]?.kind !== 'identifier') continue;
     const headerEnd = statementEnd(tokens, file.pairs, name + 1, tokens.length);
     let end = headerEnd + 1;
-    while (end < tokens.length && tokens[end].value !== 'endmodule') end++;
+    while (end < tokens.length && (tokens[end].value !== 'endmodule' || tokens[end].escaped)) end++;
     file.modules.push(parseModule(file, i, name, headerEnd, end));
     i = end;
   }
@@ -341,6 +378,75 @@ function tokenAt(tokens, offset) {
   return -1;
 }
 
+// Find a source item's extent only to reject unelaborated generate branches in
+// reverse navigation. No condition is evaluated and normal definition lookup is
+// unaffected, including when the optional generate/endgenerate wrapper is absent.
+function sourceItemEnd(tokens, pairs, start, limit) {
+  const word = tokens[start]?.value;
+  if (word === 'if' || word === 'for') {
+    if (tokens[start + 1]?.value !== '(' || !pairs.has(start + 1)) return limit;
+    let end = sourceItemEnd(tokens, pairs, pairs.get(start + 1) + 1, limit);
+    if (word === 'if' && tokens[end]?.value === 'else') end = sourceItemEnd(tokens, pairs, end + 1, limit);
+    return end;
+  }
+  if (word === 'begin' || ['case', 'casex', 'casez'].includes(word)) {
+    const opening = word === 'begin' ? new Set(['begin']) : new Set(['case', 'casex', 'casez']);
+    const closing = word === 'begin' ? 'end' : 'endcase';
+    let depth = 1;
+    for (let i = start + 1; i < limit; i++) {
+      if (opening.has(tokens[i].value)) depth++;
+      if (tokens[i].value === closing) depth--;
+      if (depth === 0) {
+        return tokens[i + 1]?.value === ':' ? Math.min(i + 3, limit) : i + 1;
+      }
+    }
+    return limit;
+  }
+  return Math.min(statementEnd(tokens, pairs, start, limit) + 1, limit);
+}
+
+function conditionalSourceRanges(mod) {
+  const { tokens, pairs } = mod.file;
+  const ranges = [];
+  for (let i = 0; i < tokens.length; i++) {
+    if (tokens[i].start < mod.bodyStart || tokens[i].end > mod.bodyEnd) continue;
+    if (!['if', 'for', 'case', 'casex', 'casez'].includes(tokens[i].value)) continue;
+    const end = sourceItemEnd(tokens, pairs, i, tokens.length);
+    ranges.push([tokens[i].start, tokens[Math.max(i, end - 1)]?.end ?? mod.bodyEnd]);
+  }
+  return ranges;
+}
+
+function localConditionalRanges(mod) {
+  const { tokens, pairs } = mod.file;
+  const procedural = [];
+  for (let i = 0; i < tokens.length; i++) {
+    if (tokens[i].start < mod.bodyStart || tokens[i].end > mod.bodyEnd) continue;
+    if (!['always', 'always_comb', 'always_ff', 'always_latch', 'initial', 'final'].includes(tokens[i].value)) continue;
+    let start = i + 1;
+    while (['@', '#'].includes(tokens[start]?.value)) {
+      start++;
+      if (tokens[start]?.value === '(' && pairs.has(start)) start = pairs.get(start) + 1;
+      else start++;
+    }
+    while (tokens[start]?.value === 'forever' || ['repeat', 'while', 'foreach'].includes(tokens[start]?.value)) {
+      if (tokens[start].value === 'forever') start++;
+      else if (tokens[start + 1]?.value === '(' && pairs.has(start + 1)) start = pairs.get(start + 1) + 1;
+      else break;
+    }
+    const end = sourceItemEnd(tokens, pairs, start, tokens.length);
+    procedural.push([tokens[i].start, tokens[Math.max(i, end - 1)]?.end ?? mod.bodyEnd]);
+  }
+  // An if/for/case inside a procedural statement is a runtime use, not an
+  // unelaborated generate branch. Preserve those ordinary signal references.
+  return conditionalSourceRanges(mod).filter(([start]) => {
+    for (let scope = mod.tokenScopes.get(tokenAt(tokens, start)); scope; scope = scope.parent) {
+      if (scope.kind === 'function' || scope.kind === 'task') return false;
+    }
+    return !procedural.some(([from, to]) => start >= from && start < to);
+  });
+}
+
 class HdlIndex {
   constructor() { this._files = new Map(); this._modules = []; this._byName = new Map(); }
   update(filePath, text) {
@@ -358,11 +464,92 @@ class HdlIndex {
     }
   }
   modules() {
-    return this._modules.map(({ file, scopes, tokenScopes, excluded, ...mod }) => ({ ...mod }));
+    return this._modules.map(({ file, scopes, tokenScopes, excluded, portAliases, ...mod }) => ({ ...mod }));
   }
   _moduleLocations(name) { return (this._byName.get(name) || []).map(mod => location(mod.path, { start: mod.start, end: mod.end, value: mod.name }, 'module')); }
   _connectionDefinitions(instance, connection) {
     return (this._byName.get(instance.type) || []).flatMap(mod => mod.scopes[0].symbols.filter(symbol => symbol.name === connection.name && symbol.kind === connection.kind));
+  }
+  localSignal(filePath, offset) {
+    const file = this._files.get(fileKey(filePath));
+    if (!file) return undefined;
+    let tokenIndex = tokenAt(file.tokens, offset);
+    if (tokenIndex > 0 && file.tokens[tokenIndex].start === offset && file.tokens[tokenIndex].kind === 'punctuation' && file.tokens[tokenIndex - 1].end === offset && file.tokens[tokenIndex - 1].kind === 'identifier') tokenIndex--;
+    if (tokenIndex < 0 || file.tokens[tokenIndex].kind !== 'identifier') return undefined;
+    const token = file.tokens[tokenIndex];
+    const mod = file.modules.find(item => token.start >= item.bodyStart && token.end <= item.bodyEnd);
+    if (!mod) return undefined;
+    const explicitPorts = new Set(mod.instances.flatMap(instance => instance.ports.filter(port => !port.implicit).map(port => port.start)));
+    if (explicitPorts.has(token.start)) return undefined;
+    const localTargets = start => unique(this.definitions(file.path, start).filter(target =>
+      ['port', 'signal'].includes(target.kind) && fileKey(target.path) === fileKey(file.path) && target.start >= mod.bodyStart && target.end <= mod.bodyEnd));
+    const targets = localTargets(token.start);
+    if (targets.length !== 1) return undefined;
+    const declaration = targets[0], declarationKey = key(declaration);
+    const conditions = localConditionalRanges(mod);
+    const uncertain = (candidate, index) => candidate.conditional || mod.tokenScopes.get(index)?.generated || conditions.some(([start, end]) => candidate.start >= start && candidate.end <= end);
+    const hasMacro = file.tokens.some(candidate => candidate.start >= mod.bodyStart && candidate.end <= mod.bodyEnd && candidate.kind === 'macro');
+    const references = [];
+    for (let index = 0; index < file.tokens.length; index++) {
+      const candidate = file.tokens[index];
+      if (candidate.kind !== 'identifier' || candidate.value !== declaration.name || candidate.start < mod.bodyStart || candidate.end > mod.bodyEnd || candidate.start === declaration.start || explicitPorts.has(candidate.start) || uncertain(candidate, index)) continue;
+      const resolved = localTargets(candidate.start);
+      if (resolved.length === 1 && key(resolved[0]) === declarationKey) references.push(location(file.path, candidate, 'reference'));
+    }
+    return { declaration,
+      module: { name: mod.name, path: mod.path, start: mod.start, end: mod.end, bodyStart: mod.bodyStart, bodyEnd: mod.bodyEnd },
+      references: unique(references), certain: !mod.conditional && !declaration.conditional && !hasMacro && !uncertain(token, tokenIndex) };
+  }
+  parentConnections(filePath, offset, options = {}) {
+    const file = this._files.get(fileKey(filePath));
+    if (!file) return undefined;
+    let tokenIndex = tokenAt(file.tokens, offset);
+    if (tokenIndex > 0 && file.tokens[tokenIndex].start === offset && file.tokens[tokenIndex].kind === 'punctuation' && file.tokens[tokenIndex - 1].end === offset && file.tokens[tokenIndex - 1].kind === 'identifier') tokenIndex--;
+    if (tokenIndex < 0 || file.tokens[tokenIndex].kind !== 'identifier') return undefined;
+    const token = file.tokens[tokenIndex];
+    const mod = file.modules.find(item => token.start >= item.bodyStart && token.end <= item.bodyEnd);
+    if (!mod) return undefined;
+    let declaration;
+    if (token.start === mod.start) declaration = location(mod.path, token, 'module', { conditional: mod.conditional });
+    else {
+      const ports = mod.scopes[0].symbols.filter(symbol => symbol.kind === 'port' && symbol.direction && !symbol.provisional);
+      declaration = ports.find(symbol => symbol.start === token.start);
+      if (!declaration) {
+        const alias = mod.portAliases.find(symbol => symbol.start === token.start);
+        const matches = alias ? ports.filter(symbol => symbol.name === alias.name) : [];
+        if (matches.length === 1) declaration = matches[0];
+      }
+    }
+    if (!declaration) return undefined;
+    const module = { name: mod.name, path: mod.path, start: mod.start, end: mod.end, bodyStart: mod.bodyStart, bodyEnd: mod.bodyEnd };
+    const connections = [];
+    // Source indexing cannot select a library definition or evaluate preprocessing.
+    // The semantic backend can still use this exact declaration and owner to query
+    // its actual elaborated instances when these conservative candidates are empty.
+    if ((this._byName.get(mod.name) || []).length !== 1 || mod.conditional || declaration.conditional) return { declaration, module, connections };
+    for (const parent of this._modules) {
+      if (parent.conditional) continue;
+      const parentTokens = parent.file.tokens.filter(item => item.start >= parent.bodyStart && item.end <= parent.bodyEnd);
+      if (parentTokens.some(item => item.kind === 'macro')) continue;
+      const conditionalRanges = conditionalSourceRanges(parent);
+      for (const instance of parent.instances) {
+        if (instance.type !== mod.name || instance.conditional) continue;
+        if (conditionalRanges.some(([start, end]) => instance.start >= start && instance.bodyEnd <= end)) continue;
+        const extras = { parentModule: parent.name, instance: instance.name, type: instance.type };
+        if (declaration.kind === 'module') {
+          connections.push(location(parent.path, { start: instance.start, end: instance.end, value: instance.name }, 'instance', extras));
+        } else {
+          const ports = instance.ports.filter(port => port.name === declaration.name && !port.conditional);
+          if (options.target === 'expression') {
+            const expression = ports.length === 1 ? connectionExpression(parent.file.text, { ...ports[0], ...extras }) : undefined;
+            if (expression) connections.push(expression);
+          } else if(options.target==='port') {
+            if(ports.length===1)connections.push({...ports[0],...extras});
+          } else connections.push(...ports.map(port => ({ ...port, ...extras })));
+        }
+      }
+    }
+    return { declaration, module, connections: unique(connections) };
   }
   definitions(filePath, offset) {
     const file = this._files.get(fileKey(filePath));
@@ -443,4 +630,4 @@ class HdlIndex {
   }
 }
 
-module.exports = { HdlIndex };
+module.exports = { HdlIndex, connectionExpression };

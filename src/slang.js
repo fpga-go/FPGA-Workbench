@@ -5,7 +5,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { pathToFileURL, fileURLToPath } = require('node:url');
 const { StdioLsp } = require('./lsp');
-const { HdlIndex } = require('./indexer');
+const { HdlIndex, connectionExpression } = require('./indexer');
 
 const canonical = value => process.platform === 'win32' ? path.resolve(value).toLowerCase() : path.resolve(value);
 const hdl = file => /\.(sv|v|svh|vh)$/i.test(file);
@@ -90,6 +90,89 @@ async function resolveElaboratedDefinition({ uri, text, position, execute, readT
     if (!parent.instPath) continue;
     await walk(parent.instPath, await execute('slang.getScope', [parent.instPath]));
   }
+  return [...new Map(results.map(result => [JSON.stringify([uriKey(result.targetUri), result.targetSelectionRange]), result])).values()];
+}
+
+/** Reverse navigation uses the elaborated instance graph, not LSP references:
+ * Slang's source references can also include inactive branches and local uses.
+ * The structural index supplies token positions only after an actual instance
+ * has been matched to this exact module declaration in Slang's design.
+ */
+async function resolveElaboratedParentConnections({ uri, text, position, query, execute, readText, token, options = {} }) {
+  const { declaration, module: owner } = query || {};
+  if (!owner || !declaration || !['module', 'port'].includes(declaration.kind) || token?.isCancellationRequested) return [];
+  const filePath = uriKey(uri);
+  if (canonical(owner.path) !== filePath) return [];
+  const active = await execute('slang.getInstancesOfModule', [owner.name]);
+  if (token?.isCancellationRequested) return [];
+  const paths = new Set((active || []).map(item => item.instPath).filter(Boolean));
+  if (!paths.size) return [];
+  const results = [];
+  const visited = new Set();
+  const sources = new Map([[filePath, { text, index: new HdlIndex() }]]);
+  sources.get(filePath).index.update(filePath, text);
+  const sourceAt = async targetUri => {
+    const key = uriKey(targetUri);
+    if (!sources.has(key)) {
+      const source = await readText(targetUri);
+      if (source === undefined) return undefined;
+      const index = new HdlIndex(); index.update(key, source);
+      sources.set(key, { text: source, index });
+    }
+    return sources.get(key);
+  };
+  const hasDescendant = scope => [...paths].some(candidate => candidate.startsWith(`${scope}.`) || candidate.startsWith(`${scope}[`));
+  const walk = async (scope, items, depth = 0) => {
+    if (depth > 64 || visited.has(scope) || token?.isCancellationRequested) return;
+    visited.add(scope);
+    for (const item of items || []) {
+      if (token?.isCancellationRequested) return;
+      const itemPath = childPath(scope, item.instName || '');
+      if (paths.has(itemPath) && item.kind === 'Instance' && item.declName === owner.name && item.declLoc && item.instLoc &&
+          uriKey(item.declLoc.uri) === filePath && samePosition(item.declLoc.range.start, positionAt(text, owner.bodyStart))) {
+        let portMatches = true;
+        if (declaration.kind === 'port') {
+          const members = item.children?.length ? item.children : await execute('slang.getScope', [itemPath]);
+          portMatches = (members || []).some(member => member.kind === 'Port' && member.instName === declaration.name && member.instLoc &&
+            uriKey(member.instLoc.uri) === filePath && samePosition(member.instLoc.range.start, positionAt(text, declaration.start)));
+        }
+        if (portMatches) {
+          const source = await sourceAt(item.instLoc.uri);
+          // Root instances have the module's own source range rather than an
+          // instantiation token, so they intentionally have no parent target.
+          const instance = source?.index.modules().flatMap(mod => mod.instances).find(instance => instance.type === owner.name &&
+            samePosition(positionAt(source.text, instance.start), item.instLoc.range.start));
+          const ports = instance?.ports.filter(port => port.name === declaration.name) || [];
+          // The elaborated graph confirms the instance, but exposes no source
+          // location for its parent-side port connection. LSP definitions also
+          // leave named connections unresolved. A conditional source port can
+          // therefore be an inactive preprocessor branch; never choose it by
+          // name or token order. Show the confirmed instance when the source has
+          // no unique unconditional connection (also covers positional / .*).
+          const uniquePort = declaration.kind === 'port' && ports.length === 1 && !ports[0].conditional;
+          let target = options.target === 'port' && declaration.kind === 'port' && !uniquePort ? undefined : uniquePort ? ports[0] : instance;
+          // Combined local/upstream peek requests the parent's actual source
+          // expression. Empty or unsafe expressions add no signal preview;
+          // an ambiguous connection retains only its confirmed instance name.
+          if (uniquePort && options.target === 'expression') target = connectionExpression(source.text, target);
+          if (target) {
+            const range = { start: positionAt(source.text, target.start), end: positionAt(source.text, target.end) };
+            const offset = offsetAt(text, position);
+            results.push({ targetUri: item.instLoc.uri, targetRange: range, targetSelectionRange: range,
+              ...(offset >= declaration.start && offset <= declaration.end ? {
+                originSelectionRange: { start: positionAt(text, declaration.start), end: positionAt(text, declaration.end) }
+              } : {}) });
+          }
+        }
+      }
+      if (hasDescendant(itemPath) && ['Instance', 'Scope', 'ScopeArray', 'InstanceArray'].includes(item.kind)) {
+        const children = item.children?.length ? item.children : await execute('slang.getScope', [itemPath]);
+        await walk(itemPath, children, depth + 1);
+      }
+    }
+  };
+  await walk('', await execute('slang.getScope', ['']));
+  if (token?.isCancellationRequested) return [];
   return [...new Map(results.map(result => [JSON.stringify([uriKey(result.targetUri), result.targetSelectionRange]), result])).values()];
 }
 
@@ -306,6 +389,24 @@ class SlangBackend {
     } catch (error) { if (!token?.isCancellationRequested) this.log(error.message); return null; }
   }
 
+  async parentConnections(document, position, query, token, options = {}) {
+    if (!this.running || !this.belongs(document)) return null;
+    try {
+      await this.queue;
+      if (token?.isCancellationRequested || !this.commands.has('slang.getInstancesOfModule') || !this.commands.has('slang.getScope')) return [];
+      this.syncDocument(document);
+      const text = document.getText();
+      await this.flushDesign();
+      const result = await resolveElaboratedParentConnections({ uri: document.uri.toString(), text, position, query, token, options,
+        execute: (command, args) => this.cachedExecute(command, args),
+        readText: async uri => {
+          for (const [knownUri, data] of this.documents) if (uriKey(knownUri) === uriKey(uri)) return data.text;
+          return decodeSource(await fs.readFile(fileURLToPath(uri)), this.encoding).text;
+        } });
+      return !token?.isCancellationRequested && document.getText() === text ? this.locations(result) : [];
+    } catch (error) { if (!token?.isCancellationRequested) this.log(error.message); return null; }
+  }
+
   execute(command, args, timeout = 10000) {
     return this.client.request('workspace/executeCommand', { command, arguments: args }, { timeout });
   }
@@ -379,4 +480,4 @@ class SlangBackend {
   }
 }
 
-module.exports = { SlangBackend, decodeSource, semanticFilelist, resolveElaboratedDefinition };
+module.exports = { SlangBackend, decodeSource, semanticFilelist, resolveElaboratedDefinition, resolveElaboratedParentConnections };

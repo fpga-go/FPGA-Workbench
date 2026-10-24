@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "repository": "https://github.com/mshr-h/vscode-verilog-hdl-support",
+  "commit": "4af5dc18fdf906d35577bbc0aa2937d09d964f5b",
+  "retrievedAt": "2026-10-23T06:54:25.749Z",
+  "licenseNotice": "vendor/licenses/hdl-grammars.txt",
+  "files": [
+    {
+      "local": "syntaxes/hdl.tmLanguage.json",
+      "upstream": "syntaxes/verilog.tmLanguage.json",
+      "source": "https://github.com/mshr-h/vscode-verilog-hdl-support/blob/4af5dc18fdf906d35577bbc0aa2937d09d964f5b/syntaxes/verilog.tmLanguage.json",
+      "rawSource": "https://raw.githubusercontent.com/mshr-h/vscode-verilog-hdl-support/4af5dc18fdf906d35577bbc0aa2937d09d964f5b/syntaxes/verilog.tmLanguage.json",
+      "upstreamSha256": "3845f1f2c02728057f942f57d9caf67cd9371f78825a9396263e5186279d1176",
+      "scopeName": "source.verilog",
+      "patches": [
+        "Recognize optional signed/base prefixes, base-specific unknown digits and separators in based literals; put real/exponent patterns before decimal integers and allow signed exponents.",
+        "Use whole-word exclusions for compiler directives so similarly prefixed macro names remain macros; recognize additional standard compiler directives.",
+        "Recognize escaped identifiers as complete lexical tokens before embedded keyword matches, including module/instance/parenthesized header contexts.",
+        "Add function/task declaration header scopes, including multiline headers; recognize automatic as a Verilog keyword.",
+        "Keep unclassified ordinary/escaped identifiers neutral using meta.identifier scopes; classify known instance types as entity.name.type.module and instance names as meta.instance.name rather than HTML tag or generic variable scopes."
+      ],
+      "localSha256": "4b3d4ec996483baafff52b48956bf708453e36786e1e031abb718f7c308a4258"
+    },
+    {
+      "local": "syntaxes/systemverilog.tmLanguage.json",
+      "upstream": "syntaxes/systemverilog.tmLanguage.json",
+      "source": "https://github.com/mshr-h/vscode-verilog-hdl-support/blob/4af5dc18fdf906d35577bbc0aa2937d09d964f5b/syntaxes/systemverilog.tmLanguage.json",
+      "rawSource": "https://raw.githubusercontent.com/mshr-h/vscode-verilog-hdl-support/4af5dc18fdf906d35577bbc0aa2937d09d964f5b/syntaxes/systemverilog.tmLanguage.json",
+      "upstreamSha256": "c27624043627d022691dc15a1f61d481476a4c74975edb6ea5469d665d6ff1d1",
+      "scopeName": "source.systemverilog",
+      "patches": [
+        "Limit grammar fileTypes to sv/svh; keep independent source.systemverilog and source.verilog language registrations.",
+        "Prefer module/interface/program/package/modport header rules before generic definition keyword rules.",
+        "Use whole-word reserved-word exclusions in call names and exclude SVA keywords from generic function-call classification.",
+        "Recognize escaped identifiers as identifiers rather than strings, including punctuation-adjacent tokens and nested declaration contexts.",
+        "Replace the unrelated PHP assertion-label scope with entity.name.label.systemverilog.",
+        "Keep unclassified ordinary/escaped identifiers neutral, including select expressions; use neutral meta.instance.name for instance identifiers instead of variable.other.module.",
+        "Remove uppercase-name-only constant guesses so unclassified uppercase signals and parameter references remain neutral without semantic resolution."
+      ],
+      "localSha256": "9a00c8b5a9cb8aa812c933469fecc2a1f5bf80fcaf35fbfece1ca6386c815957"
+    }
+  ],
+  "licenseSources": [
+    {
+      "path": "LICENSE",
+      "source": "https://github.com/mshr-h/vscode-verilog-hdl-support/blob/4af5dc18fdf906d35577bbc0aa2937d09d964f5b/LICENSE"
+    },
+    {
+      "path": "THIRD_PARTY_NOTICES.md",
+      "source": "https://github.com/mshr-h/vscode-verilog-hdl-support/blob/4af5dc18fdf906d35577bbc0aa2937d09d964f5b/THIRD_PARTY_NOTICES.md",
+      "sections": [
+        "VSCode-SystemVerilog",
+        "TextMate Verilog Bundle"
+      ]
+    }
+  ]
+}
