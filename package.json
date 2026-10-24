@@ -2,7 +2,7 @@
   "name": "fpga-workbench",
   "displayName": "FPGA Workbench · 工程导航",
   "description": "打开 Vivado .xpr，浏览工程文件和模块层级，跳转 Verilog/SystemVerilog 模块、端口与信号。",
-  "version": "0.2.7",
+  "version": "0.2.10",
   "publisher": "fpga-go",
   "icon": "media/fpga-go-marketplace.png",
   "galleryBanner": {
@@ -46,7 +46,9 @@
   },
   "devDependencies": {
     "@vscode/vsce": "^3.7.0",
-    "esbuild": "^0.25.0"
+    "esbuild": "^0.25.0",
+    "vscode-oniguruma": "2.0.1",
+    "vscode-textmate": "9.3.2"
   },
   "contributes": {
     "commands": [

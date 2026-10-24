@@ -19,7 +19,9 @@
 
 源码仓库：[fpga-go/FPGA-Workbench](https://github.com/fpga-go/FPGA-Workbench)。`package.json` 已填写对应的 repository、homepage 和 bugs 地址。
 
-发布前先核对[分支与版本维护规范](docs/RELEASING.md)。只有 `develop` 可以发布 Marketplace 正式版；`feature` 在 GitHub 和 Marketplace 均只能发布 Pre-release；`main` 暂不发布。GitHub Release 必须同时上传对应版本的 `.vsix` 和 SHA256 校验文件，自动生成的源码归档不能替代安装包。合并到 `develop` 须由用户在 GitHub 网页确认。
+本次正式版本为 **0.2.10 / Windows x64**，打包来源分支为 `develop`，源码标签为 `v0.2.10`，`main` 同步正式版本基线。功能来自用户已确认通过的 0.2.9 预发布；普通信号着色、模块顶部固定与导航功能的验证范围见 [VERIFICATION.md](VERIFICATION.md)。实际发布状态以商店和 GitHub 为准。
+
+发布前先核对[分支与版本维护规范](docs/RELEASING.md)。只有 `develop` 可以生成 Marketplace 正式包；`feature` 在 GitHub 和 Marketplace 均只能发布 Pre-release；`main` 保存经确认的正式基线，不直接打包。GitHub Release 必须同时上传对应版本的 `.vsix` 和 SHA256 校验文件，自动生成的源码归档不能替代安装包。本轮用户已明确授权合并至 `develop/main` 并正式发布；后续合并和发布仍需明确授权，并遵循仓库保护规则。
 
 ## 建立独立 Git 仓库
 
@@ -61,6 +63,8 @@ npm run package
 安装包生成在 `output/`。验证范围以 [VERIFICATION.md](VERIFICATION.md) 为准；生成 VSIX 本身不证明导航功能通过验证。
 
 分发源码 ZIP 时，从此独立目录中经过审查的文件生成归档。分发 VSIX 时，使用此副本重新构建的安装包。不要复用其他目录中生成的旧包。
+
+从 `v0.2.10` 起，已提交的 `.gitattributes` 用 `output/** export-ignore` 排除自动源码归档中的安装产物。仓库中既有历史安装包及旧标签不删除、不改写；新源码归档仍须实际下载检查，不能只凭属性配置推断归档内容。
 
 ## 检查实际归档内容
 

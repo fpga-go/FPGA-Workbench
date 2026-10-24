@@ -7,7 +7,7 @@ function validatePackageRequest(branch, options) {
   }
   if (options.length > 1) throw new Error('--pre-release 参数不能重复。');
   if (!branch || branch === 'HEAD') throw new Error('无法确认当前 Git 分支，拒绝打包；分离 HEAD 不允许打包。');
-  if (branch === 'main') throw new Error('main 分支已冻结，禁止打包发布。');
+  if (branch === 'main') throw new Error('main 仅同步正式基线，禁止直接打包；请在 develop 分支生成正式安装包。');
   if (branch !== 'feature' && branch !== 'develop') {
     throw new Error(`仅允许 feature 或 develop 分支打包，当前分支：${branch}。`);
   }

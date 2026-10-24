@@ -9,3 +9,5 @@
 *.zip binary
 # Preserve upstream files and their recorded hashes exactly.
 vendor/** -text -whitespace
+# Keep build artifacts out of new source archives; preserve tracked historical files.
+output/** export-ignore

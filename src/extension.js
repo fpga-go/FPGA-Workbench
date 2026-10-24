@@ -19,6 +19,7 @@ class Workbench {
     this.backend = new SlangBackend();
     this.texts = new Map();
     this.members = new Set();
+    this.symbolRegistration = undefined;
     this.watchers = [];
     this.revision = 0;
     this.sourceRevision = 0;
@@ -47,7 +48,6 @@ class Workbench {
       vscode.window.onDidChangeActiveTextEditor(()=>this.updateEditorContext()),
       vscode.languages.registerDefinitionProvider(selector,{provideDefinition:(d,p,t)=>this.definitions(d,p,t)}),
       vscode.languages.registerReferenceProvider(selector,{provideReferences:(d,p,c,t)=>this.references(d,p,c.includeDeclaration,t)}),
-      vscode.languages.registerDocumentSymbolProvider(selector,{provideDocumentSymbols:d=>this.symbols(d)}),
       {dispose:()=>this.dispose()});
   }
   config() { return vscode.workspace.getConfiguration('fpgaWorkbench'); }
@@ -131,6 +131,7 @@ class Workbench {
         }
         this.project = project; this.index = index; this.texts = texts;
         this.members = new Set(project.sourceFiles.map(key));
+        this.registerDocumentSymbols();
         await vscode.commands.executeCommand('setContext','fpgaWorkbench.loaded',true);
         await this.updateEditorContext();
         if(!current()) return false;
@@ -146,14 +147,29 @@ class Workbench {
       });
     };
     try {return await this.enqueue(operation) && current();}
-    catch(err) {if(!current())return false;this.status.text='$(warning) FPGA: 读取失败';throw err;}
+    catch(err) {if(!current())return false;this.disposeDocumentSymbols();this.status.text='$(warning) FPGA: 读取失败';throw err;}
   }
   isCurrent(revision) {return !this.disposed && revision === this.revision;}
   enqueue(operation) {
     this.loading = (this.loading || Promise.resolve()).catch(()=>{}).then(operation);
     return this.loading;
   }
+  disposeDocumentSymbols() {
+    this.symbolRegistration?.dispose();
+    this.symbolRegistration = undefined;
+  }
+  registerDocumentSymbols() {
+    this.disposeDocumentSymbols();
+    if(this.disposed || !this.project) return;
+    const revision=this.revision;
+    // A new provider identity invalidates VS Code's cached Outline and Sticky
+    // Scroll models when project membership changes without a text edit.
+    this.symbolRegistration=vscode.languages.registerDocumentSymbolProvider(selector,{
+      provideDocumentSymbols:(d,t)=>this.isCurrent(revision) ? this.symbols(d,t) : []
+    });
+  }
   clearProjectView() {
+    this.disposeDocumentSymbols();
     this.project = undefined;this.loadTarget = undefined;
     ++this.sourceRevision;
     this.index = new HdlIndex();this.texts.clear();this.members.clear();
@@ -418,10 +434,15 @@ class Workbench {
     }
     return this.index.references(doc.uri.fsPath,doc.offsetAt(pos),includeDeclaration).map(l=>this.location(l));
   }
-  symbols(doc) {
-    if(!this.members.has(key(doc.uri.fsPath))) return [];
+  symbols(doc,token) {
+    if(this.disposed || doc.uri.scheme!=='file' || !this.members.has(key(doc.uri.fsPath)) || token?.isCancellationRequested) return [];
     this.changedDocument(doc);
-    return this.index.modules().filter(m=>key(m.path)===key(doc.uri.fsPath)).map(m=>new vscode.SymbolInformation(m.name,vscode.SymbolKind.Module,'',this.location(m)));
+    const text=this.texts.get(key(doc.uri.fsPath));
+    // Native Sticky Scroll needs the whole module body, while symbol selection
+    // should still reveal only its name. No editor setting is changed here.
+    return this.index.modules().filter(m=>key(m.path)===key(doc.uri.fsPath)).map(m=>new vscode.DocumentSymbol(m.name,'',vscode.SymbolKind.Module,
+      new vscode.Range(this.position(text,m.bodyStart),this.position(text,m.bodyEnd)),
+      new vscode.Range(this.position(text,m.start),this.position(text,m.end))));
   }
   async navigate(peek) {
     const editor=vscode.window.activeTextEditor;if(!editor) return;
@@ -491,6 +512,7 @@ class Workbench {
     if(this.disposed)return this.loading;
     this.disposed=true;++this.revision;
     clearTimeout(this.refreshTimer);clearTimeout(this.treeTimer);this.clearWatchers();
+    this.disposeDocumentSymbols();
     return this.enqueue(()=>this.backend.stop());
   }
 }

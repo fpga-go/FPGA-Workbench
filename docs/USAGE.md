@@ -8,7 +8,7 @@ Windows x64 安装包自带 slang-server v0.3.0，无需另装 Python、Ctags �
 
 ## 安装和开始使用
 
-1. 从仓库 Releases 下载 VSIX，在 VS Code 扩展面板右上角的 `…` 菜单中选择“从 VSIX 安装”，打开下载的安装包。
+1. 在 VS Code 扩展面板搜索 **FPGA Workbench**，确认发布者为 **fpga-go** 后安装正式版。新功能试用时可另选预发布版本；已有 VSIX 也可通过扩展面板右上角的 `…` →“从 VSIX 安装”打开。
 2. 打开日常使用的工作目录，点击左侧芯片图标 **FPGA Workbench**。
 3. 点击“选择 Vivado 工程 (.xpr)”，选择工程。工程可以位于工作区内，也可以位于其他目录。
 4. 展开“工程文件”查看文件集和目录，展开“模块层级”查看实例。点击文件或模块即可编辑。
@@ -43,6 +43,18 @@ Windows x64 安装包自带 slang-server v0.3.0，无需另装 Python、Ctags �
 插件不再绑定 Alt+F12，也不修改 VS Code 自带或用户自定义的快捷键。
 
 同时启用 TerosHDL、slang 或其他 HDL 导航扩展时，VS Code 通用 F12 和原生速览窗口可能合并多个扩展的结果。需要只查看当前工程结果时，使用带 **FPGA** 前缀的右键命令。本插件不会自动修改其他扩展设置。
+
+## 长代码阅读与着色
+
+加载工程后，向下滚动较长的模块，VS Code 原生 **Sticky Scroll** 会将模块声明所在行固定在顶部；用鼠标左键单击标题即可返回声明处。本版提供 `module` 的完整文档符号范围，大纲中的模块名称仍指向模块名。
+
+顶部固定遵循 VS Code 设置。需要启用时，在设置中搜索 **Sticky Scroll**，打开 **Editor › Sticky Scroll: Enabled**。插件不会修改用户的开关或显示行数。模块内部未保存的编辑也用于更新范围；关闭工程后停止提供该工程的模块符号。
+
+`.v/.vh` 使用 Verilog 着色，`.sv/.svh` 使用独立的 SystemVerilog 着色。规则覆盖注释、字符串、数值、宏、模块与实例、函数/任务，以及 SV 的 `interface/modport`、`package/class`、`typedef/enum/struct`、断言和序列等结构。文件右下角的语言模式决定使用的规则。
+
+着色使用主题的标准语法类别，深色、浅色和高对比主题可各自选择颜色。该功能是基础词法着色；不会依据工程语义区分信号读写，也不会按 `clk/rst` 名称强制配色。已有模块和信号导航仍按当前工程查询。
+
+普通信号和暂不能确认角色的标识符使用主题正文前景色，避免某些主题把所有信号统一显示为红色。关键字、数值、字符串、注释、明确的模块类型和函数等仍按各自类别着色。插件不会修改用户的主题颜色设置。
 
 ## 工程范围
 
@@ -118,6 +130,7 @@ VSIX 输出到 `output/`，文件名自动采用 `package.json` 中的版本号�
 - [slang-server](https://github.com/hudson-trading/slang-server)：随包分发的语义后端。
 - [TerosHDL](https://github.com/TerosTechnology/vscode-terosHDL)：参考工程和层级交互，未复制其 GPL 源码。
 - [Digital IDE](https://github.com/Digital-EDA/Digital-IDE)：参考 FPGA 工程侧栏体验。
+- [Verilog-HDL](https://github.com/mshr-h/vscode-verilog-hdl-support)：基础 Verilog/SV 着色规则来源；固定提交、原授权与本地补丁见源码 `syntaxes/UPSTREAM.json`、`syntaxes/README.md` 及随包第三方通知。
 - [Verilog-HDL](https://github.com/mshr-h/vscode-verilog-hdl-support) 与 [SVLangserver](https://github.com/imc-trading/svlangserver)：比较语言支持与索引方式。
 
 本项目原始代码沿用仓库的 **MIT** 许可证，版权归 **fpga-go**，见 [LICENSE.txt](../LICENSE.txt)。第三方组件保留各自许可证，见 [THIRD_PARTY_NOTICES.txt](../THIRD_PARTY_NOTICES.txt) 和 `vendor/`。
