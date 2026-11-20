@@ -502,3 +502,126 @@ test('an unfinished module uses the current source end and updates when its clos
   assert.equal(index.modules()[0].bodyEnd, text.length + 9);
   assert.ok(index.modules()[0].bodyEnd < index.modules()[1].bodyStart);
 });
+
+test('connection previews retain complete named ports across alignment gaps, tabs and label comments', () => {
+  const connections = ['.o_data(w_data)', '.i_data                 ( w_data )', '.i_tab\t\t(\tw_data\t)', '. /* label */ i_comment (w_data)'];
+  const text = `module top; wire w_data; child u(${connections.join(', ')}); endmodule`;
+  const { index } = setup({ 'top.sv': text });
+  const ports = index.modules()[0].instances[0].ports;
+  const before = ports.map(port => ({ ...port }));
+  for (const [i, port] of ports.entries()) {
+    const signal = text.indexOf('w_data', port.expressionStart);
+    const preview = index.connectionPreview('top.sv', signal, signal + 'w_data'.length);
+    assert.equal(text.slice(preview.start, preview.end), connections[i]);
+    assert.equal(preview.path, 'top.sv');
+    assert.deepEqual(index.connectionPreview('top.sv', port.start, port.end), preview);
+    assert.equal(text.slice(port.start, port.end), port.name);
+    assert.equal(text[port.expressionStart - 1], '(');
+    assert.equal(text[port.expressionEnd], ')');
+    assert.equal(index.connectionPreview('top.sv', port.start + 1, port.end), undefined);
+  }
+  assert.deepEqual(ports, before, 'Preview queries must not mutate word or expression ranges');
+});
+
+test('connection previews isolate each same-line port and keep repeated expression references intact', () => {
+  const first = '.i_data({w_data[3:0], f(w_data)})', second = '.o_data(w_data)';
+  const text = `module top; wire [7:0] w_data; child u(${first}, ${second}); endmodule`;
+  const { index } = setup({ 'top.sv': text });
+  const declaration = text.indexOf('w_data');
+  const before = index.localSignal('top.sv', declaration).references;
+  assert.equal(before.length, 3);
+  const previews = before.map(item => index.connectionPreview(item.path, item.start, item.end));
+  assert.deepEqual(previews.map(item => text.slice(item.start, item.end)), [first, first, second]);
+  assert.deepEqual(previews[0], previews[1], 'The display can group repeated words in one connection');
+  assert.notDeepEqual(previews[0], previews[2], 'Distinct ports on one line retain distinct display spans');
+  assert.deepEqual(index.localSignal('top.sv', declaration).references, before);
+  assert.equal(index.connectionPreview('top.sv', declaration, declaration + 6), undefined);
+  assert.equal(index.connectionPreview('top.sv', before[0].start, before[2].end), undefined);
+});
+
+test('connection previews reject implicit, positional, parameter, multiline and malformed connections', () => {
+  const text = 'module top; wire data; child #(.WIDTH(data)) u(.data, .multi(\n data\n), .bad(data) suffix, .valid(data)); child positional(data); endmodule';
+  const { index } = setup({ 'top.sv': text });
+  const instance = index.modules()[0].instances[0];
+  for (const port of instance.ports.filter(port => port.name !== 'valid')) {
+    assert.equal(index.connectionPreview('top.sv', port.start, port.end), undefined, port.name);
+    if (!port.implicit) {
+      const signal = text.indexOf('data', port.expressionStart);
+      assert.equal(index.connectionPreview('top.sv', signal, signal + 4), undefined, port.name);
+    }
+  }
+  for (const port of instance.ports.filter(port => ['data', 'bad'].includes(port.name))) {
+    assert.equal(port.connectionStart, undefined);
+    assert.equal(port.connectionEnd, undefined);
+  }
+  const parameter = instance.parameters[0];
+  assert.equal(index.connectionPreview('top.sv', parameter.start, parameter.end), undefined);
+  assert.equal(index.connectionPreview('top.sv', parameter.expressionStart, parameter.expressionEnd), undefined);
+  const positional = text.indexOf('data', text.indexOf('positional('));
+  assert.equal(index.connectionPreview('top.sv', positional, positional + 4), undefined);
+  const valid = instance.ports.find(port => port.name === 'valid');
+  const validPreview = index.connectionPreview('top.sv', valid.start, valid.end);
+  assert.equal(text.slice(validPreview.start, validPreview.end), '.valid(data)');
+  for (const [start, end] of [[-1, 2], [1, 1], [3, 2], [1.5, 3], [0, text.length + 1]]) {
+    assert.equal(index.connectionPreview('top.sv', start, end), undefined);
+  }
+  assert.equal(index.connectionPreview('missing.sv', 0, 1), undefined);
+});
+
+test('connection previews honor document identity, source updates and ambiguous metadata', () => {
+  const text = 'module top; wire data; child u(.data(data)); endmodule';
+  const index = new HdlIndex(); index.update('C:/Work/top.sv', text);
+  const start = text.indexOf('data', text.indexOf('.data(') + 6);
+  const preview = index.connectionPreview('c:\\work\\TOP.sv', start, start + 4);
+  assert.equal(text.slice(preview.start, preview.end), '.data(data)');
+  // An ambiguous index entry must not make the display choose one connection.
+  const instance = index.modules()[0].instances[0];
+  instance.ports.push({ ...instance.ports[0] });
+  assert.equal(index.connectionPreview('C:/Work/top.sv', start, start + 4), undefined);
+  index.update('C:/Work/top.sv', 'module top; endmodule');
+  assert.equal(index.connectionPreview('C:/Work/top.sv', start, start + 4), undefined);
+  index.remove('C:/Work/top.sv');
+  assert.equal(index.connectionPreview('C:/Work/top.sv', start, start + 4), undefined);
+});
+
+
+test('multiline instance previews start at the parsed module type across nested parameter expressions', () => {
+  const text = 'module top;\nchild #(\n .W(f(2, g(3))), /* ) fake inst( */\n .S("not ) a_type")\n) first(.clk(clk)),\nsecond(.clk(clk));\nchild plain(.clk(clk)); endmodule';
+  const {index} = setup({'top.sv':text});
+  const instances = index.modules()[0].instances;
+  assert.equal(instances.length, 3);
+  for (const instance of instances.slice(0, 2)) {
+    const span = index.instancePreview('top.sv', instance.start, instance.end);
+    assert.equal(span.start, text.indexOf('child #'));
+    assert.equal(span.end, instance.end);
+    assert(text.slice(span.start, span.end).endsWith(instance.name));
+  }
+  assert.notEqual(index.instancePreview('top.sv',instances[0].start,instances[0].end).end,
+    index.instancePreview('top.sv',instances[1].start,instances[1].end).end);
+  assert.equal(index.instancePreview('top.sv',instances[2].start,instances[2].end), undefined);
+  assert.equal(index.instancePreview('top.sv',text.indexOf('clk'),text.indexOf('clk')+3), undefined);
+  assert.equal(index.instancePreview('missing.sv',0,5), undefined);
+});
+
+
+test('candidate summaries distinguish module, parameter and port without rewriting expressions', () => {
+  const text = 'module top; leaf #(\n.W( 8 ), .S("a  b")) first(.data( bus [3:0] )), second(.data(bus)); leaf plain(.data); endmodule';
+  const {index} = setup({'top.sv':text}); const [first, second, plain] = index.modules()[0].instances;
+  const rows = target => index.candidateSummaries('top.sv', target.start, target.end);
+  assert.equal(rows(first)[0].label, 'leaf #() first (');
+  assert.equal(rows(plain)[0].label, 'leaf plain (');
+  assert.deepEqual(rows(first.parameters[0]).map(row => row.label), ['leaf #(.W(8)) first','leaf #(.W(8)) second']);
+  assert.equal(rows(first.parameters[1])[0].label, 'leaf #(.S("a  b")) first');
+  assert.equal(rows(first.ports[0])[0].label, 'leaf first (.data(bus[3:0]))');
+  assert.equal(rows(plain.ports[0])[0].label, 'leaf plain (.data)');
+  assert.equal(rows(first.ports[0])[0].start, first.ports[0].start);
+  assert.deepEqual(index.candidateSummaries('missing',0,1), []);
+});
+
+
+test('local declaration rows show only the selected symbol', () => {
+ const text='module child #(parameter W=8, H=16)(input wire a, b); endmodule';
+ const {index}=setup({'child.v':text});const owner=index.modules()[0];
+ const target=owner.symbols.find(item=>item.name==='W');
+ assert.equal(index.candidateSummaries('child.v',target.start,target.end)[0].label,'child · parameter W');
+});

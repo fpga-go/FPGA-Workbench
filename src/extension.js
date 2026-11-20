@@ -7,6 +7,10 @@ const {buildProjectTree} = require('./project-tree');
 const {HdlIndex} = require('./indexer');
 const {SlangBackend} = require('./slang');
 const {readSource} = require('./encoding');
+const {HdlHighlighter} = require('./highlighting');
+const {HdlLinter} = require('./linting');
+const {LintView} = require('./lint-view');
+const {CandidatePages} = require('./candidates');
 const key = p => process.platform === 'win32' ? path.resolve(p).toLowerCase() : path.resolve(p);
 const slash = p => p.replace(/\\/g, '/');
 const selector = [{scheme:'file',pattern:'**/*.{v,sv,vh,svh}'}];
@@ -25,6 +29,8 @@ class Workbench {
     this.sourceRevision = 0;
     this.disposed = false;
     this.project = undefined;
+    this.candidates = new CandidatePages(vscode, this);
+    context.subscriptions.push(this.candidates);
     this.fileset = context.workspaceState.get('fileset');
     this.top = context.workspaceState.get('top');
     this.output = vscode.window.createOutputChannel('FPGA Workbench');
@@ -43,14 +49,24 @@ class Workbench {
       vscode.workspace.onDidChangeTextDocument(e=>this.changedDocument(e.document)),
       vscode.workspace.onDidOpenTextDocument(d=>this.changedDocument(d)),
       vscode.workspace.onDidCloseTextDocument(d=>this.closedDocument(d)),
-      vscode.workspace.onDidChangeConfiguration(e=> {if(e.affectsConfiguration('fpgaWorkbench')) this.scheduleRefresh();}),
+      vscode.workspace.onDidChangeConfiguration(e=> {
+        if(['backend','slangPath','sourceEncoding','includeSimulation','extraIncludeDirs','extraDefines','watchFiles']
+          .some(name=>e.affectsConfiguration(`fpgaWorkbench.${name}`))) this.scheduleRefresh();
+      }),
       vscode.workspace.onDidChangeWorkspaceFolders(()=>this.change.fire()),
       vscode.window.onDidChangeActiveTextEditor(()=>this.updateEditorContext()),
-      vscode.languages.registerDefinitionProvider(selector,{provideDefinition:(d,p,t)=>this.definitions(d,p,t)}),
-      vscode.languages.registerReferenceProvider(selector,{provideReferences:(d,p,c,t)=>this.references(d,p,c.includeDeclaration,t)}),
+      vscode.languages.registerDefinitionProvider(selector,{provideDefinition:async(d,p,t)=> {
+        const items=await this.definitions(d,p,t);
+        if(t?.isCancellationRequested)return [];
+        const page=this.candidatePage(items);
+        return page ? [page] : this.previewLocations(items);
+      }}),
+      vscode.languages.registerReferenceProvider(selector,{provideReferences:async(d,p,c,t)=>this.previewLocations(await this.references(d,p,c.includeDeclaration,t))}),
       {dispose:()=>this.dispose()});
   }
   config() { return vscode.workspace.getConfiguration('fpgaWorkbench'); }
+  candidateText(uri) { return uri.scheme === 'file' && this.members.has(key(uri.fsPath)) ? this.texts.get(key(uri.fsPath)) : undefined; }
+  candidatePage(items) { return this.config().get('navigation.candidateList','native') === 'summary' ? this.candidates.location(items) : undefined; }
   node(label, options={}) {
     const item = new vscode.TreeItem(label,options.children ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.None);
     Object.assign(item,options);
@@ -95,6 +111,8 @@ class Workbench {
   }
   async load(xpr) {
     if(this.disposed) return false;
+    const previousTarget = this.loadTarget || this.project?.path;
+    if(!previousTarget || key(previousTarget) !== key(xpr)) this.linting?.reset();
     const revision = ++this.revision;
     const current = () => this.isCurrent(revision);
     const fileset = this.fileset, top = this.top, cfg = this.config();
@@ -131,6 +149,7 @@ class Workbench {
         }
         this.project = project; this.index = index; this.texts = texts;
         this.members = new Set(project.sourceFiles.map(key));
+        this.linting?.projectChanged(false);
         this.registerDocumentSymbols();
         await vscode.commands.executeCommand('setContext','fpgaWorkbench.loaded',true);
         await this.updateEditorContext();
@@ -147,7 +166,7 @@ class Workbench {
       });
     };
     try {return await this.enqueue(operation) && current();}
-    catch(err) {if(!current())return false;this.disposeDocumentSymbols();this.status.text='$(warning) FPGA: 读取失败';throw err;}
+    catch(err) {if(!current())return false;this.linting?.projectChanged(false);this.disposeDocumentSymbols();this.status.text='$(warning) FPGA: 读取失败';throw err;}
   }
   isCurrent(revision) {return !this.disposed && revision === this.revision;}
   enqueue(operation) {
@@ -169,6 +188,7 @@ class Workbench {
     });
   }
   clearProjectView() {
+    this.linting?.projectChanged(true);
     this.disposeDocumentSymbols();
     this.project = undefined;this.loadTarget = undefined;
     ++this.sourceRevision;
@@ -184,6 +204,8 @@ class Workbench {
     clearTimeout(this.refreshTimer);clearTimeout(this.treeTimer);this.clearWatchers();
     this.fileset = undefined;this.top = undefined;
     this.clearProjectView();
+    this.linting?.reset();
+    this.linting?.projectChanged(false);
     await Promise.all([
       vscode.commands.executeCommand('setContext','fpgaWorkbench.hasProject',false),
       ...['project','fileset','top'].map(name=>this.context.workspaceState.update(name,undefined)),
@@ -314,6 +336,22 @@ class Workbench {
       return [JSON.stringify([key(uri.fsPath),range.start.line,range.start.character,range.end.line,range.end.character]),item];
     })).values()];
   }
+  previewLocations(items) {
+    if(this.disposed)return [];
+    // Native Peek derives both its row text and highlight from the same range.
+    // Expand only confirmed candidates at the presentation boundary; semantic
+    // queries, module boundaries and signal identities keep their token ranges.
+    return this.uniqueLocations((items || []).map(item=> {
+      const uri=item.targetUri || item.uri,range=item.targetSelectionRange || item.range || item.targetRange;
+      if(uri?.scheme!=='file' || !range || !this.members.has(key(uri.fsPath)))return item;
+      const text=this.texts.get(key(uri.fsPath));if(text===undefined)return item;
+      const connection=this.index.instancePreview(uri.fsPath,this.offset(text,range.start),this.offset(text,range.end))
+        || this.index.connectionPreview(uri.fsPath,this.offset(text,range.start),this.offset(text,range.end));
+      if(!connection)return item;
+      const expanded=new vscode.Range(this.position(text,connection.start),this.position(text,connection.end));
+      return item.targetUri ? {...item,targetRange:expanded,targetSelectionRange:expanded} : new vscode.Location(uri,expanded);
+    }));
+  }
   async definitions(doc,pos,token,options={}) {
     if(options.localOnly)return this.definitionTargets(doc,pos,token,options);
     if(doc.uri.scheme!=='file' || !this.members.has(key(doc.uri.fsPath)) || token?.isCancellationRequested)return [];
@@ -324,7 +362,29 @@ class Workbench {
     const locals=await this.definitionTargets(doc,pos,token);
     if(!current())return [];
     const query=this.index.localSignal(doc.uri.fsPath,doc.offsetAt(pos));
-    if(!query)return locals;
+    if(!query) {
+      if(this.config().get('navigation.candidateList','native')==='summary' && locals?.length===1) {
+        const parsed=this.index.definitions(doc.uri.fsPath,doc.offsetAt(pos));
+        const item=locals[0],uri=item.targetUri || item.uri,range=item.targetSelectionRange || item.range || item.targetRange;
+        const source=uri && this.candidateText(uri);
+        if(parsed.length===1 && parsed[0].kind==='parameter' && source!==undefined && range &&
+          key(uri.fsPath)===key(parsed[0].path) && this.offset(source,range.start)===parsed[0].start) {
+          const refs=await this.references(doc,pos,true,token);
+          if(this.backend.running && current()) {
+            const owner=this.index.modules().find(mod=>key(mod.path)===key(parsed[0].path) && parsed[0].start>=mod.bodyStart && parsed[0].end<=mod.bodyEnd);
+            if(owner) {
+              try {
+                const declarationDoc={uri,getText:()=>source};
+                const parents=await this.backend.parentConnections(declarationDoc,this.position(source,parsed[0].start),{declaration:parsed[0],module:owner},token);
+                refs.push(...(parents || []));
+              } catch(e) {if(current())this.output.appendLine(`参数连接：${e.message}`);}
+            }
+          }
+          return current() ? this.uniqueLocations([...locals,...refs]) : [];
+        }
+      }
+      return this.previewLocations(locals);
+    }
     const matching=items=>this.uniqueLocations((items || []).filter(item=> {
       const uri=item.targetUri || item.uri,range=item.targetSelectionRange || item.range || item.targetRange;
       return uri?.scheme==='file' && range && key(uri.fsPath)===key(query.declaration.path)
@@ -453,16 +513,20 @@ class Workbench {
     try {locations=await (peek ? this.peekDefinitions(editor.document,position,cancellation.token) : this.definitions(editor.document,position,cancellation.token));}
     finally {cancellation.dispose();}
     if(!this.isCurrent(revision) || vscode.window.activeTextEditor!==editor || editor.document.getText()!==text || editor.selection.active.line!==position.line || editor.selection.active.character!==position.character)return;
-    const targets=(locations || []).map(l=>l.targetUri ? new vscode.Location(l.targetUri,l.targetSelectionRange || l.targetRange):l);
-    if(!targets.length) {vscode.window.showInformationMessage('当前工程中没有找到定义。请检查文件集、宏定义和 include 路径。');return;}
     const signal=this.index.localSignal(editor.document.uri.fsPath,editor.document.offsetAt(position));
     const showPeek=peek || !!signal;
+    const page=this.candidatePage(locations);
+    if(page)return vscode.window.showTextDocument(page.uri,{selection:page.range,preview:true});
+    const targets=(showPeek ? this.previewLocations(locations) : locations || []).map(l=>l.targetUri ? new vscode.Location(l.targetUri,l.targetSelectionRange || l.targetRange):l);
+    if(!targets.length) {vscode.window.showInformationMessage('当前工程中没有找到定义。请检查文件集、宏定义和 include 路径。');return;}
     await vscode.commands.executeCommand('editor.action.goToLocations',editor.document.uri,position,targets,showPeek?'peek':'goto','未找到定义',showPeek);
   }
   async findReferences() {
     const editor=vscode.window.activeTextEditor;if(!editor)return;
     const refs=await this.references(editor.document,editor.selection.active,true,new vscode.CancellationTokenSource().token);
-    await vscode.commands.executeCommand('editor.action.showReferences',editor.document.uri,editor.selection.active,refs);
+    const page=this.candidatePage(refs);
+    if(page)return vscode.window.showTextDocument(page.uri,{selection:page.range,preview:true});
+    await vscode.commands.executeCommand('editor.action.showReferences',editor.document.uri,editor.selection.active,this.previewLocations(refs));
   }
   async openLocation(loc) {
     const target=this.location(loc);
@@ -511,18 +575,45 @@ class Workbench {
   dispose() {
     if(this.disposed)return this.loading;
     this.disposed=true;++this.revision;
+    this.candidates.dispose();
+    this.highlighting?.dispose();
+    const lintingStopped = this.linting?.dispose();
+    this.lintView?.dispose();
     clearTimeout(this.refreshTimer);clearTimeout(this.treeTimer);this.clearWatchers();
     this.disposeDocumentSymbols();
-    return this.enqueue(()=>this.backend.stop());
+    return this.enqueue(async()=>{await Promise.all([this.backend.stop(),lintingStopped]);});
   }
 }
 
 function activate(context) {
   const app = new Workbench(context);active=app;
+  const highlighting = new HdlHighlighter(vscode, context.extensionPath, {
+    onError: error => app.output.appendLine(`语法配色未就绪：${error.message}`)
+  });
+  app.highlighting = highlighting;
+  context.subscriptions.push(highlighting);
+  context.subscriptions.push(vscode.commands.registerCommand('fpgaWorkbench.selectColorScheme', async () => {
+    try {
+      const mode = await highlighting.selectScheme();
+      if (mode) app.output.appendLine(`语法配色：${mode}`);
+    } catch (error) { app.report(error); }
+  }));
+  const lintView = new LintView(vscode);
+  app.lintView = lintView;
+  const linting = new HdlLinter(vscode, () => app.project, {state: context.workspaceState,onDidChange:snapshot=>lintView.update(snapshot)});
+  app.linting = linting;
+  context.subscriptions.push(linting,lintView);
   const commands={selectProject:u=>app.selectProject(u),switchProject:u=>app.selectProject(typeof u === 'string' || (u?.scheme === 'file' && typeof u.fsPath === 'string') ? u : undefined),closeProject:()=>app.closeProject(),refresh:()=>app.refresh(),selectFileset:()=>app.chooseFileset(),selectTop:()=>app.chooseTop(),exportFilelist:()=>app.exportFilelist(),openFilelistSkill:()=>app.openFilelistSkill(),projectInfo:()=>app.info(),peekDefinition:()=>app.navigate(true),gotoDefinition:()=>app.navigate(false),parentConnections:()=>app.findReferences(),openLocation:l=>app.openLocation(l),openHierarchy:p=>app.backend.showHierarchy(p)};
   for(const [name,handler] of Object.entries(commands)) context.subscriptions.push(vscode.commands.registerCommand(`fpgaWorkbench.${name}`,async(...args)=>{try{return await handler(...args);}catch(e){app.report(e);}}));
+  context.subscriptions.push(vscode.commands.registerCommand('fpgaWorkbench.runLint',()=>linting.run()),
+    vscode.commands.registerCommand('fpgaWorkbench.showLintOutput',()=>linting.showOutput()),
+    vscode.commands.registerCommand('fpgaWorkbench.enableLint',()=>linting.setEnabled(true)),
+    vscode.commands.registerCommand('fpgaWorkbench.disableLint',()=>linting.setEnabled(false)),
+    vscode.commands.registerCommand('fpgaWorkbench.configureLint',()=>linting.configure()),
+    vscode.commands.registerCommand('fpgaWorkbench.selectLintTool',()=>linting.selectTool()),
+    vscode.commands.registerCommand('fpgaWorkbench.selectManualLintTool',()=>linting.selectManualTool()));
   void app.restore().catch(e=>app.report(e));
-  return {workbench:app};
+  return {workbench:app,highlighting,linting,lintView};
 }
 async function deactivate() {if(active)await active.dispose();}
 module.exports={activate,deactivate};

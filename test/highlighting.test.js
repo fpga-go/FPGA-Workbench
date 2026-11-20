@@ -14,6 +14,21 @@ const files = {
   verilog: 'syntaxes/hdl.tmLanguage.json',
   systemverilog: 'syntaxes/systemverilog.tmLanguage.json'
 };
+
+test('the manifest defaults to native theme coloring and keeps fixed colors opt-in', () => {
+  const manifest = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+  const contributions = Array.isArray(manifest.contributes.configuration) ? manifest.contributes.configuration : [manifest.contributes.configuration];
+  const modes = contributions.flatMap(configuration => Object.entries(configuration.properties || {}))
+    .filter(([name]) => name === 'fpgaWorkbench.highlighting.mode');
+  assert.equal(modes.length, 1, 'The setting must be registered once for Settings UI discovery');
+  const [, setting] = modes[0];
+  assert.equal(setting.type, 'string');
+  assert.equal(setting.default, 'theme');
+  assert.equal(setting.scope, 'window');
+  assert.deepEqual(setting.enum, ['theme', 'fixed', 'custom']);
+  assert.equal(manifest.contributes.grammars.length, 2, 'Native mode retains both bundled HDL grammars');
+});
+
 let registryPromise;
 function registry() {
   if (!registryPromise) registryPromise = (async () => {
@@ -320,6 +335,63 @@ test('Verilog: modules, parameterized instances, multiline functions and tasks',
   scoped(rows[8], 'drive', 'entity.name.function.verilog');
   scoped(rows[10], 'endmodule', 'storage.type.module.verilog');
 });
+
+test('Verilog: instance patterns reject whole reserved words without rejecting legal keyword prefixes', async () => {
+  const rows = await tokenize('verilog', [
+    'module top;',
+    '  begin end',
+    '  initial begin',
+    '  fork join',
+    '  child end',
+    '  begin #(1) fake();',
+    '  reg #(1) fake();',
+    '  always_pipe mybegin(.clk(clk));',
+    '  child$kind begin$tail(.clk(clk));',
+    '  always_pipe #(.P(1)) mybegin(.clk(clk));',
+    'endmodule'
+  ]);
+  for (const [line, words] of [[1, ['begin', 'end']], [2, ['initial', 'begin']], [3, ['fork', 'join']],
+    [4, ['end']], [5, ['begin']], [6, ['reg']]]) {
+    for (const word of words) scoped(rows[line], word, 'keyword.other.verilog');
+    assert.equal(rows[line].tokens.some(token => token.scopes.some(scope =>
+      scope.startsWith('meta.block.instantiation.'))), false, rows[line].line);
+  }
+  scoped(rows[4], 'child', 'meta.identifier.verilog');
+  for (const [line, type, instance] of [[7, 'always_pipe', 'mybegin'], [8, 'child$kind', 'begin$tail'],
+    [9, 'always_pipe', 'mybegin']]) {
+    scoped(rows[line], type, 'entity.name.type.module.verilog');
+    scoped(rows[line], instance, 'meta.instance.name.verilog');
+  }
+  scoped(rows[10], 'endmodule', 'storage.type.module.verilog');
+});
+
+test('Verilog: configuration and primitive keywords cannot start or name instances', async () => {
+  const reserved = ['config', 'endconfig', 'design', 'cell', 'instance', 'liblist', 'library', 'use',
+    'uwire', 'noshowcancelled', 'pulsestyle_onevent', 'highz0', 'notif1', 'rtranif0', 'weak1'];
+  const lines = ['module top;'];
+  for (const word of reserved) lines.push(`  ${word} candidate();`, `  child ${word}();`, `  ${word} #(1) candidate();`);
+  lines.push('endmodule');
+  const rows = await tokenize('verilog', lines);
+  for (const row of rows.slice(1, -1)) {
+    assert.equal(row.tokens.some(token => token.scopes.some(scope =>
+      scope.startsWith('meta.block.instantiation.'))), false, row.line);
+  }
+});
+
+for (const language of Object.keys(files)) {
+  test(`${language}: multiline comments crossing a macro line retain ordinary recovery`, async () => {
+    const rows = await tokenize(language, ['`define NOTE /* begin', 'end */ wire recovered;', 'wire after;']);
+    scoped(rows[0], 'begin', 'comment');
+    scoped(rows[1], 'end', 'comment');
+    scoped(rows[1], 'wire', language === 'verilog' ? 'keyword' : 'storage');
+    scoped(rows[1], 'recovered', 'meta.identifier');
+    scoped(rows[2], 'after', 'meta.identifier');
+    for (const row of rows.slice(1)) {
+      assert.equal(tokenAt(row, row === rows[1] ? 'recovered' : 'after').scopes.some(scope =>
+        scope.startsWith('meta.preprocessor.definition.')), false);
+    }
+  });
+}
 
 test('SystemVerilog: signed, unbased, exponent and time literals retain numeric scopes', async () => {
   const row = (await tokenize('systemverilog', ["localparam A = 8'shA5, B = -32'sd1, C = '0, D = '1, E = 'x, F = 12.5e-3, G = 1e+6, H = 2.5ns, I = 10ps; "]))[0];

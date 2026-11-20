@@ -1,0 +1,8 @@
+{
+  "package": "vscode-oniguruma",
+  "version": "2.0.1",
+  "license": "MIT",
+  "source": "https://registry.npmjs.org/vscode-oniguruma/-/vscode-oniguruma-2.0.1.tgz",
+  "file": "release/onig.wasm",
+  "sha256": "76ebc1f0d87b2e7449a45ff3cd1a1546a9f05f54bdac44ee03e8a2b8348897be"
+}

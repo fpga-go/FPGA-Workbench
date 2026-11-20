@@ -14,9 +14,12 @@
 !media/fpga-go-marketplace.png
 !media/navigation-overview.png
 !syntaxes/*.json
+!snippets/*.json
 !vendor/slang/**
+!vendor/oniguruma/**
 !vendor/licenses/**
 !VERIFICATION.md
 !PUBLISHING.md
 !docs/USAGE.md
+!docs/LINT.md
 !docs/RELEASING.md

@@ -263,7 +263,9 @@ function namedConnections(mod, start, end, kind) {
   for (const [from, to] of split(tokens, pairs, start, end)) {
     if (tokens[from]?.value !== '.' || tokens[from + 1]?.kind !== 'identifier') continue;
     const name = tokens[from + 1];
-    result.push({ ...location(mod.path, name, kind), conditional: !!name.conditional, expressionStart: tokens[from + 2]?.end ?? name.end, expressionEnd: tokens[to - 1]?.start ?? name.end, implicit: tokens[from + 2]?.value !== '(' });
+    const complete = tokens[from + 2]?.value === '(' && pairs.get(from + 2) === to - 1;
+    result.push({ ...location(mod.path, name, kind), conditional: !!name.conditional, expressionStart: tokens[from + 2]?.end ?? name.end, expressionEnd: tokens[to - 1]?.start ?? name.end, implicit: tokens[from + 2]?.value !== '(',
+      ...(complete ? { connectionStart: tokens[from].start, connectionEnd: tokens[to - 1].end } : {}) });
   }
   return result;
 }
@@ -323,6 +325,7 @@ function parseInstances(mod, scope, start, limit) {
     const end = pairs.get(i);
     if (end >= limit) return undefined;
     instances.push({ ...location(mod.path, name, 'instance'), type: type.value, typeStart: type.start, typeEnd: type.end,
+      parameterized: tokens[start + 1]?.value === '#',
       scopeId: scope.id, conditional: !!type.conditional || scope.generated, ports: namedConnections(mod, i + 1, end, 'port'), parameters,
       bodyStart: type.start, bodyEnd: tokens[end].end });
     i = end + 1;
@@ -469,6 +472,84 @@ class HdlIndex {
   _moduleLocations(name) { return (this._byName.get(name) || []).map(mod => location(mod.path, { start: mod.start, end: mod.end, value: mod.name }, 'module')); }
   _connectionDefinitions(instance, connection) {
     return (this._byName.get(instance.type) || []).flatMap(mod => mod.scopes[0].symbols.filter(symbol => symbol.name === connection.name && symbol.kind === connection.kind));
+  }
+  // A presentation span for an already-confirmed target, never a source of
+  // semantic references. Keep the original word ranges intact for navigation.
+  instancePreview(filePath, start, end) {
+    const file = this._files.get(fileKey(filePath));
+    if (!file) return undefined;
+    const matches = file.modules.flatMap(mod => mod.instances).filter(instance =>
+      instance.start === start && instance.end === end);
+    if (matches.length !== 1) return undefined;
+    const instance = matches[0];
+    if (!/[\r\n]/.test(file.text.slice(instance.typeStart, instance.start))) return undefined;
+    // Use parsed token/pair boundaries, not a backwards line or regexp search.
+    // Keep the instance end so comma-separated instances remain distinct.
+    return { path: file.path, start: instance.typeStart, end: instance.end };
+  }
+  candidateSummaries(filePath, start, end) {
+    const file = this._files.get(fileKey(filePath));
+    if (!file || !Number.isInteger(start) || !Number.isInteger(end) || end <= start) return [];
+    // Use original token spelling. Collapse only gaps outside strings and escaped
+    // identifiers; removing all whitespace could change an HDL expression.
+    const compact = (from, to) => {
+      const tokens = file.tokens.filter(token => token.start >= from && token.end <= to);
+      let result = '', previous;
+      for (const token of tokens) {
+        if (previous && token.start > previous.end && (previous.escaped ||
+            (previous.kind !== 'punctuation' && token.kind !== 'punctuation') ||
+            (previous.kind === 'punctuation' && token.kind === 'punctuation' &&
+              !/[()[\]{},.]/.test(previous.value + token.value)))) result += ' ';
+        result += file.text.slice(token.start, token.end).replace(/\r?\n/g, ' ');
+        previous = token;
+      }
+      return result;
+    };
+    const result = [];
+    for (const mod of file.modules) for (const instance of mod.instances) {
+      const type = compact(instance.typeStart, instance.typeEnd);
+      const name = compact(instance.start, instance.end);
+      const add = (label, target, kind) => result.push({label, path:file.path,
+        start:target.start, end:target.end, kind, parentModule:mod.name, instance:instance.name});
+      if ((start === instance.start && end === instance.end) ||
+          (start === instance.typeStart && (end === instance.typeEnd || end === instance.end))) {
+        add(`${type}${instance.parameterized ? ' #()' : ''} ${name} (`, instance, 'instance');
+        continue;
+      }
+      for (const connection of [...instance.parameters, ...instance.ports]) {
+        const exact = start === connection.start && end === connection.end;
+        const expression = start >= connection.expressionStart && end <= connection.expressionEnd;
+        const whole = start === connection.connectionStart && end === connection.connectionEnd;
+        if (!exact && !expression && !whole) continue;
+        const part = connection.implicit ? '.' + compact(connection.start, connection.end)
+          : compact(connection.connectionStart, connection.connectionEnd);
+        if (!part) continue;
+        add(connection.kind === 'parameter' ? `${type} #(${part}) ${name}` : `${type} ${name} (${part})`, connection, connection.kind);
+      }
+    }
+    if (!result.length) {
+      for (const mod of file.modules) for (const symbol of mod.symbols) {
+        if (symbol.start === start && symbol.end === end && ['port','parameter','signal'].includes(symbol.kind)) {
+          result.push({label:`${mod.name} · ${symbol.direction || symbol.kind} ${compact(start,end)}`,
+            path:file.path,start,end,kind:symbol.kind,parentModule:mod.name});
+        }
+      }
+    }
+    return result;
+  }
+  connectionPreview(filePath, start, end) {
+    const file = this._files.get(fileKey(filePath));
+    if (!file || !Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end <= start || end > file.text.length) return undefined;
+    let result;
+    for (const mod of file.modules) for (const instance of mod.instances) for (const port of instance.ports) {
+      if (port.implicit || !Number.isInteger(port.connectionStart) || !Number.isInteger(port.connectionEnd)) continue;
+      const expression = start >= port.expressionStart && end <= port.expressionEnd;
+      const formal = start === port.start && end === port.end;
+      if ((!expression && !formal) || /[\r\n]/.test(file.text.slice(port.connectionStart, port.connectionEnd))) continue;
+      if (result) return undefined;
+      result = { path: file.path, start: port.connectionStart, end: port.connectionEnd };
+    }
+    return result;
   }
   localSignal(filePath, offset) {
     const file = this._files.get(fileKey(filePath));
