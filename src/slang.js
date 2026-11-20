@@ -149,7 +149,12 @@ async function resolveElaboratedParentConnections({ uri, text, position, query, 
           // therefore be an inactive preprocessor branch; never choose it by
           // name or token order. Show the confirmed instance when the source has
           // no unique unconditional connection (also covers positional / .*).
-          const uniquePort = declaration.kind === 'port' && ports.length === 1 && !ports[0].conditional;
+          // An elaborated instance confirms its enclosing source branch. A port
+          // in exactly that branch inherits this confirmation; nested or sibling
+          // branches still need their own proof and must remain excluded.
+          const uniquePort = declaration.kind === 'port' && ports.length === 1 &&
+            (!ports[0].conditional || (instance.conditionalContext !== undefined &&
+              ports[0].conditionalContext === instance.conditionalContext));
           let target = options.target === 'port' && declaration.kind === 'port' && !uniquePort ? undefined : uniquePort ? ports[0] : instance;
           if (declaration.kind === 'parameter') {
             const parameters = instance?.parameters.filter(parameter => parameter.name === declaration.name) || [];
@@ -158,7 +163,7 @@ async function resolveElaboratedParentConnections({ uri, text, position, query, 
           // Combined local/upstream peek requests the parent's actual source
           // expression. Empty or unsafe expressions add no signal preview;
           // an ambiguous connection retains only its confirmed instance name.
-          if (uniquePort && options.target === 'expression') target = connectionExpression(source.text, target);
+          if (uniquePort && options.target === 'expression') target = connectionExpression(source.text, { ...target, conditional: false });
           if (target) {
             const range = { start: positionAt(source.text, target.start), end: positionAt(source.text, target.end) };
             const offset = offsetAt(text, position);
