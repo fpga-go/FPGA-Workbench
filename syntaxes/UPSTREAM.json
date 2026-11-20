@@ -17,9 +17,10 @@
         "Use whole-word exclusions for compiler directives so similarly prefixed macro names remain macros; recognize additional standard compiler directives.",
         "Recognize escaped identifiers as complete lexical tokens before embedded keyword matches, including module/instance/parenthesized header contexts.",
         "Add function/task declaration header scopes, including multiline headers; recognize automatic as a Verilog keyword.",
-        "Keep unclassified ordinary/escaped identifiers neutral using meta.identifier scopes; classify known instance types as entity.name.type.module and instance names as meta.instance.name rather than HTML tag or generic variable scopes."
+        "Keep unclassified ordinary/escaped identifiers neutral using meta.identifier scopes; classify known instance types as entity.name.type.module and instance names as meta.instance.name rather than HTML tag or generic variable scopes.",
+        "Reject complete Verilog reserved words in both parameterless instance captures and parameterized instance types; preserve legal identifiers with keyword prefixes or dollar-sign suffixes."
       ],
-      "localSha256": "4b3d4ec996483baafff52b48956bf708453e36786e1e031abb718f7c308a4258"
+      "localSha256": "fdad4f3def8fc49bdc34b07f22357437ced970f9a05a8bc6e497e0ba618d0e5e"
     },
     {
       "local": "syntaxes/systemverilog.tmLanguage.json",

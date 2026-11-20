@@ -2,7 +2,7 @@
   "name": "fpga-workbench",
   "displayName": "FPGA Workbench · 工程导航",
   "description": "打开 Vivado .xpr，浏览工程文件和模块层级，跳转 Verilog/SystemVerilog 模块、端口与信号。",
-  "version": "0.2.11",
+  "version": "0.2.28",
   "publisher": "fpga-go",
   "icon": "media/fpga-go-marketplace.png",
   "galleryBanner": {
@@ -27,6 +27,8 @@
   ],
   "main": "./dist/extension.js",
   "activationEvents": [
+    "onLanguage:verilog",
+    "onLanguage:systemverilog",
     "onStartupFinished"
   ],
   "capabilities": {
@@ -42,16 +44,56 @@
     "package": "node scripts/package.js"
   },
   "dependencies": {
-    "fast-xml-parser": "^5.3.0"
-  },
-  "devDependencies": {
-    "@vscode/vsce": "^3.7.0",
-    "esbuild": "^0.25.0",
+    "fast-xml-parser": "^5.3.0",
     "vscode-oniguruma": "2.0.1",
     "vscode-textmate": "9.3.2"
   },
+  "devDependencies": {
+    "@vscode/vsce": "^3.7.0",
+    "esbuild": "^0.25.0"
+  },
   "contributes": {
     "commands": [
+      {
+        "command": "fpgaWorkbench.enableLint",
+        "title": "启用语法检查",
+        "category": "FPGA"
+      },
+      {
+        "command": "fpgaWorkbench.disableLint",
+        "title": "关闭语法检查",
+        "category": "FPGA"
+      },
+      {
+        "command": "fpgaWorkbench.configureLint",
+        "title": "语法检查开关与工具",
+        "category": "FPGA",
+        "icon": "$(gear)"
+      },
+      {
+        "command": "fpgaWorkbench.runLint",
+        "title": "检查当前文件或工程语法",
+        "category": "FPGA",
+        "icon": "$(play)"
+      },
+      {
+        "command": "fpgaWorkbench.showLintOutput",
+        "title": "查看语法检查输出",
+        "category": "FPGA",
+        "icon": "$(output)"
+      },
+      {
+        "command": "fpgaWorkbench.selectLintTool",
+        "title": "选择语法检查工具",
+        "category": "FPGA",
+        "icon": "$(tools)"
+      },
+      {
+        "command": "fpgaWorkbench.selectManualLintTool",
+        "title": "手动选择语法检查工具路径",
+        "category": "FPGA",
+        "icon": "$(folder-opened)"
+      },
       {
         "command": "fpgaWorkbench.selectProject",
         "title": "选择 Vivado 工程 (.xpr)",
@@ -120,6 +162,11 @@
         "command": "fpgaWorkbench.parentConnections",
         "title": "查找引用（当前工程）",
         "category": "FPGA"
+      },
+      {
+        "command": "fpgaWorkbench.selectColorScheme",
+        "title": "选择语法配色方案",
+        "category": "FPGA Workbench"
       }
     ],
     "viewsContainers": {
@@ -140,6 +187,10 @@
         {
           "id": "fpgaWorkbench.hierarchy",
           "name": "模块层级"
+        },
+        {
+          "id": "fpgaWorkbench.lint",
+          "name": "Lint"
         }
       ]
     },
@@ -152,6 +203,29 @@
     ],
     "menus": {
       "view/title": [
+        {
+          "command": "fpgaWorkbench.runLint",
+          "when": "view == fpgaWorkbench.lint",
+          "group": "navigation@1"
+        },
+        {
+          "command": "fpgaWorkbench.selectLintTool",
+          "when": "view == fpgaWorkbench.lint",
+          "group": "navigation@2"
+        },
+        {
+          "command": "fpgaWorkbench.showLintOutput",
+          "when": "view == fpgaWorkbench.lint",
+          "group": "navigation@3"
+        },
+        {
+          "command": "fpgaWorkbench.configureLint",
+          "when": "view == fpgaWorkbench.lint"
+        },
+        {
+          "command": "fpgaWorkbench.selectManualLintTool",
+          "when": "view == fpgaWorkbench.lint"
+        },
         {
           "command": "fpgaWorkbench.selectProject",
           "when": "view == fpgaWorkbench.files && !fpgaWorkbench.hasProject",
@@ -208,6 +282,16 @@
       ],
       "editor/context": [
         {
+          "command": "fpgaWorkbench.configureLint",
+          "when": "resourceExtname =~ /\\.(v|sv|vh|svh|vhd|vhdl)$/",
+          "group": "navigation@14"
+        },
+        {
+          "command": "fpgaWorkbench.runLint",
+          "when": "resourceExtname =~ /\\.(v|sv|vh|svh|vhd|vhdl)$/",
+          "group": "navigation@13"
+        },
+        {
           "command": "fpgaWorkbench.peekDefinition",
           "when": "fpgaWorkbench.loaded && resourceExtname =~ /\\.(v|sv|vh|svh)$/",
           "group": "navigation@10"
@@ -252,17 +336,85 @@
       {
         "language": "verilog",
         "scopeName": "source.verilog",
-        "path": "syntaxes/hdl.tmLanguage.json"
+        "path": "syntaxes/hdl.tmLanguage.json",
+        "unbalancedBracketScopes": [
+          "meta.identifier",
+          "meta.instance.name",
+          "entity.name.type",
+          "entity.name.function",
+          "entity.name.section",
+          "entity.name.label",
+          "support.function",
+          "support.type.scope",
+          "storage.type.user-defined",
+          "storage.type.userdefined",
+          "variable.other.constant"
+        ]
       },
       {
         "language": "systemverilog",
         "scopeName": "source.systemverilog",
-        "path": "syntaxes/systemverilog.tmLanguage.json"
+        "path": "syntaxes/systemverilog.tmLanguage.json",
+        "unbalancedBracketScopes": [
+          "meta.identifier",
+          "meta.instance.name",
+          "entity.name.type",
+          "entity.name.function",
+          "entity.name.section",
+          "entity.name.label",
+          "support.function",
+          "support.type.scope",
+          "storage.type.user-defined",
+          "storage.type.userdefined",
+          "variable.other.constant"
+        ]
       }
     ],
     "configuration": {
       "title": "FPGA Workbench",
       "properties": {
+        "fpgaWorkbench.highlighting.mode": {
+          "type": "string",
+          "enum": [
+            "theme",
+            "fixed",
+            "custom"
+          ],
+          "enumDescriptions": [
+            "跟随当前主题。",
+            "使用此前版本的固定深浅配色。",
+            "使用自定义颜色，未填写的类别沿用固定配色。"
+          ],
+          "scope": "window",
+          "default": "theme",
+          "description": "HDL 语法配色。修改后立即生效。"
+        },
+        "fpgaWorkbench.lint.ignoreTimescaleWarnings": {
+          "type": "boolean",
+          "scope": "resource",
+          "default": true,
+          "description": "忽略 timescale 警告。语法错误仍会报告。"
+        },
+        "fpgaWorkbench.lint.verbose": {
+          "type": "boolean",
+          "scope": "resource",
+          "default": false,
+          "description": "输出完整编译命令和参数。"
+        },
+        "fpgaWorkbench.lint.runOnSave": {
+          "type": "boolean",
+          "scope": "resource",
+          "default": true,
+          "description": "保存 HDL 文件后自动检查。"
+        },
+        "fpgaWorkbench.lint.timeoutMs": {
+          "type": "integer",
+          "scope": "resource",
+          "minimum": 1000,
+          "maximum": 600000,
+          "default": 30000,
+          "description": "每个编译步骤的超时毫秒数。"
+        },
         "fpgaWorkbench.backend": {
           "type": "string",
           "enum": [
@@ -313,9 +465,161 @@
           "type": "boolean",
           "default": true,
           "description": "监听工程文件在编辑器外的更改。"
+        },
+        "fpgaWorkbench.highlighting.lightColors": {
+          "type": "object",
+          "scope": "window",
+          "default": {},
+          "additionalProperties": false,
+          "description": "浅色主题的自定义语法颜色。仅 custom 模式生效。",
+          "properties": {
+            "text": {
+              "type": "string",
+              "pattern": "^#[0-9a-fA-F]{6}$",
+              "description": "普通文字，使用 #RRGGBB。"
+            },
+            "comment": {
+              "type": "string",
+              "pattern": "^#[0-9a-fA-F]{6}$",
+              "description": "注释，使用 #RRGGBB。"
+            },
+            "string": {
+              "type": "string",
+              "pattern": "^#[0-9a-fA-F]{6}$",
+              "description": "字符串，使用 #RRGGBB。"
+            },
+            "number": {
+              "type": "string",
+              "pattern": "^#[0-9a-fA-F]{6}$",
+              "description": "数字，使用 #RRGGBB。"
+            },
+            "declaration": {
+              "type": "string",
+              "pattern": "^#[0-9a-fA-F]{6}$",
+              "description": "模块声明，使用 #RRGGBB。"
+            },
+            "type": {
+              "type": "string",
+              "pattern": "^#[0-9a-fA-F]{6}$",
+              "description": "数据类型，使用 #RRGGBB。"
+            },
+            "assignment": {
+              "type": "string",
+              "pattern": "^#[0-9a-fA-F]{6}$",
+              "description": "赋值，使用 #RRGGBB。"
+            },
+            "keyword": {
+              "type": "string",
+              "pattern": "^#[0-9a-fA-F]{6}$",
+              "description": "流程关键字，使用 #RRGGBB。"
+            },
+            "module": {
+              "type": "string",
+              "pattern": "^#[0-9a-fA-F]{6}$",
+              "description": "模块类型，使用 #RRGGBB。"
+            },
+            "function": {
+              "type": "string",
+              "pattern": "^#[0-9a-fA-F]{6}$",
+              "description": "函数，使用 #RRGGBB。"
+            },
+            "macro": {
+              "type": "string",
+              "pattern": "^#[0-9a-fA-F]{6}$",
+              "description": "宏，使用 #RRGGBB。"
+            }
+          }
+        },
+        "fpgaWorkbench.highlighting.darkColors": {
+          "type": "object",
+          "scope": "window",
+          "default": {},
+          "additionalProperties": false,
+          "description": "深色主题的自定义语法颜色。仅 custom 模式生效。",
+          "properties": {
+            "text": {
+              "type": "string",
+              "pattern": "^#[0-9a-fA-F]{6}$",
+              "description": "普通文字，使用 #RRGGBB。"
+            },
+            "comment": {
+              "type": "string",
+              "pattern": "^#[0-9a-fA-F]{6}$",
+              "description": "注释，使用 #RRGGBB。"
+            },
+            "string": {
+              "type": "string",
+              "pattern": "^#[0-9a-fA-F]{6}$",
+              "description": "字符串，使用 #RRGGBB。"
+            },
+            "number": {
+              "type": "string",
+              "pattern": "^#[0-9a-fA-F]{6}$",
+              "description": "数字，使用 #RRGGBB。"
+            },
+            "declaration": {
+              "type": "string",
+              "pattern": "^#[0-9a-fA-F]{6}$",
+              "description": "模块声明，使用 #RRGGBB。"
+            },
+            "type": {
+              "type": "string",
+              "pattern": "^#[0-9a-fA-F]{6}$",
+              "description": "数据类型，使用 #RRGGBB。"
+            },
+            "assignment": {
+              "type": "string",
+              "pattern": "^#[0-9a-fA-F]{6}$",
+              "description": "赋值，使用 #RRGGBB。"
+            },
+            "keyword": {
+              "type": "string",
+              "pattern": "^#[0-9a-fA-F]{6}$",
+              "description": "流程关键字，使用 #RRGGBB。"
+            },
+            "module": {
+              "type": "string",
+              "pattern": "^#[0-9a-fA-F]{6}$",
+              "description": "模块类型，使用 #RRGGBB。"
+            },
+            "function": {
+              "type": "string",
+              "pattern": "^#[0-9a-fA-F]{6}$",
+              "description": "函数，使用 #RRGGBB。"
+            },
+            "macro": {
+              "type": "string",
+              "pattern": "^#[0-9a-fA-F]{6}$",
+              "description": "宏，使用 #RRGGBB。"
+            }
+          }
+        },
+        "fpgaWorkbench.navigation.candidateList": {
+          "type": "string",
+          "scope": "window",
+          "enum": [
+            "summary",
+            "native"
+          ],
+          "enumDescriptions": [
+            "显示只读候选页，保留 Ctrl+左键入口。",
+            "使用 VS Code 原生候选列表。"
+          ],
+          "default": "native",
+          "description": "导航候选显示方式。修改后下次查询生效。"
         }
       }
-    }
+    },
+    "snippets": [
+      {
+        "language": "verilog",
+        "path": "./snippets/hdl-sections.json"
+      },
+      {
+        "language": "systemverilog",
+        "path": "./snippets/hdl-sections.json"
+      }
+    ]
   },
   "author": {
     "name": "fpga-go",

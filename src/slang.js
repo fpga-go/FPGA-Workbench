@@ -100,7 +100,7 @@ async function resolveElaboratedDefinition({ uri, text, position, execute, readT
  */
 async function resolveElaboratedParentConnections({ uri, text, position, query, execute, readText, token, options = {} }) {
   const { declaration, module: owner } = query || {};
-  if (!owner || !declaration || !['module', 'port'].includes(declaration.kind) || token?.isCancellationRequested) return [];
+  if (!owner || !declaration || !['module', 'port', 'parameter'].includes(declaration.kind) || token?.isCancellationRequested) return [];
   const filePath = uriKey(uri);
   if (canonical(owner.path) !== filePath) return [];
   const active = await execute('slang.getInstancesOfModule', [owner.name]);
@@ -131,9 +131,9 @@ async function resolveElaboratedParentConnections({ uri, text, position, query, 
       if (paths.has(itemPath) && item.kind === 'Instance' && item.declName === owner.name && item.declLoc && item.instLoc &&
           uriKey(item.declLoc.uri) === filePath && samePosition(item.declLoc.range.start, positionAt(text, owner.bodyStart))) {
         let portMatches = true;
-        if (declaration.kind === 'port') {
+        if (declaration.kind === 'port' || declaration.kind === 'parameter') {
           const members = item.children?.length ? item.children : await execute('slang.getScope', [itemPath]);
-          portMatches = (members || []).some(member => member.kind === 'Port' && member.instName === declaration.name && member.instLoc &&
+          portMatches = (members || []).some(member => member.kind === (declaration.kind === 'parameter' ? 'Param' : 'Port') && member.instName === declaration.name && member.instLoc &&
             uriKey(member.instLoc.uri) === filePath && samePosition(member.instLoc.range.start, positionAt(text, declaration.start)));
         }
         if (portMatches) {
@@ -151,6 +151,10 @@ async function resolveElaboratedParentConnections({ uri, text, position, query, 
           // no unique unconditional connection (also covers positional / .*).
           const uniquePort = declaration.kind === 'port' && ports.length === 1 && !ports[0].conditional;
           let target = options.target === 'port' && declaration.kind === 'port' && !uniquePort ? undefined : uniquePort ? ports[0] : instance;
+          if (declaration.kind === 'parameter') {
+            const parameters = instance?.parameters.filter(parameter => parameter.name === declaration.name) || [];
+            target = parameters.length === 1 && !parameters[0].conditional ? parameters[0] : undefined;
+          }
           // Combined local/upstream peek requests the parent's actual source
           // expression. Empty or unsafe expressions add no signal preview;
           // an ambiguous connection retains only its confirmed instance name.

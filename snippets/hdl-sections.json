@@ -1,0 +1,18 @@
+{
+  "FPGA 缩略图标题": {
+    "prefix": "fpga-mark",
+    "body": [
+      "// MARK: ${1:分区标题}"
+    ],
+    "description": "在右侧缩略图显示中文标题。"
+  },
+  "FPGA 折叠分区": {
+    "prefix": "fpga-region",
+    "body": [
+      "// #region ${1:分区标题}",
+      "$0",
+      "// #endregion"
+    ],
+    "description": "插入可折叠的中文分区标题。"
+  }
+}

@@ -31,7 +31,7 @@ function harness(t) {
   const h = {
     state: new Map(), contexts: new Map(), commands: new Map(), watchers: [], timers: new Map(),
     loadCalls: [], starts: [], backendEvents: [], logs: [], errors: [], timerId: 0, filelistCalls: [], executions: [],
-    symbolRegistrations: [], symbolEvents: [],
+    symbolRegistrations: [], symbolEvents: [], lintEvents: [],
   };
   const disposable = () => ({ disposed: false, dispose() { this.disposed = true; } });
   const uri = file => ({ scheme: 'file', fsPath: path.resolve(file), toString() { return pathToFileURL(this.fsPath).href; } });
@@ -81,12 +81,13 @@ function harness(t) {
   const workspaceRoot = uri(path.resolve('synthetic-lifecycle', 'workspace'));
   const events = Object.fromEntries(['change', 'open', 'close', 'configuration', 'folders', 'activeEditor'].map(name => [name, new Emitter()]));
   const vscode = {
-    Uri: { file: uri }, EventEmitter: Emitter,
+    Uri: { file: uri, parse: value => {const parsed=new URL(value); return {scheme:parsed.protocol.slice(0,-1), path:parsed.pathname, toString:()=>value};} }, EventEmitter: Emitter,
     TreeItem: class { constructor(label, collapsibleState) { this.label = label; this.collapsibleState = collapsibleState; } },
     ThemeIcon: class { constructor(id) { this.id = id; } },
     Position: class { constructor(line, character) { this.line = line; this.character = character; } },
     Range: class { constructor(start, end) { this.start = start; this.end = end; } },
     Location: class { constructor(locationUri, range) { this.uri = locationUri; this.range = range; } },
+    CodeLens: class {constructor(range,command) {Object.assign(this,{range,command});}},
     SymbolInformation: class {},
     DocumentSymbol: class {
       constructor(name, detail, kind, range, selectionRange) {
@@ -111,9 +112,10 @@ function harness(t) {
       showInformationMessage: message => h.logs.push(message),
     },
     workspace: {
+      registerTextDocumentContentProvider: (_scheme, provider) => {h.candidateProvider=provider;return disposable();},
       textDocuments: [], workspaceFolders: [{ name: 'workspace', uri: workspaceRoot }],
       getWorkspaceFolder: () => undefined,
-      getConfiguration: () => ({ get: (name, fallback) => name === 'watchFiles' ? true : fallback }),
+      getConfiguration: () => ({ get: (name, fallback) => name === 'watchFiles' ? true : name === 'navigation.candidateList' ? (h.candidateMode ?? fallback) : fallback }),
       onDidChangeTextDocument: events.change.event,
       onDidOpenTextDocument: events.open.event,
       onDidCloseTextDocument: events.close.event,
@@ -130,8 +132,9 @@ function harness(t) {
       fs: { writeFile: async () => { throw new Error('Lifecycle tests must not write project files.'); } },
     },
     languages: {
-      registerDefinitionProvider: disposable,
-      registerReferenceProvider: disposable,
+      registerDefinitionProvider: (selector, provider) => {if(selector.scheme==='fpga-candidates')h.candidateDefinitionProvider=provider;else h.definitionProvider = provider; return disposable(); },
+      registerCodeLensProvider: (_selector,provider) => {h.candidateLensProvider=provider;return disposable();},
+      registerReferenceProvider: (_selector, provider) => { h.referenceProvider = provider; return disposable(); },
       registerDocumentSymbolProvider: (selector, provider) => {
         h.symbolSelector = selector; h.symbolProvider = provider;
         const registration = { selector, provider, disposed: false, dispose() {
@@ -162,8 +165,26 @@ function harness(t) {
   const imports = {
     vscode, 'node:path': path, 'node:fs/promises': { access: async () => {} },
     './xpr': { loadProject: async (...args) => { h.loadCalls.push(args[0]); return h.load(...args); }, filelist: (...args) => {h.filelistCalls.push(args); return '// synthetic filelist\n';} },
+    './candidates': require('../src/candidates'),
     './indexer': { HdlIndex }, './slang': { SlangBackend: Backend }, './encoding': { readSource: (...args) => h.read(...args) },
     './project-tree': require('../src/project-tree'),
+    './highlighting': { HdlHighlighter: class { dispose() {} } },
+    './lint-view': { LintView: class {
+      update(snapshot) { h.lintSnapshot = snapshot; }
+      dispose() {}
+    } },
+    './linting': { HdlLinter: class {
+      constructor(_vscode, _getProject, options) { h.lintState = options.state; h.publishLint = options.onDidChange; }
+      dispose() {}
+      projectChanged(loading) { h.lintEvents.push({ type: 'projectChanged', loading }); }
+      reset() { h.lintEvents.push({ type: 'reset' }); }
+      run() {}
+      showOutput() {}
+      setEnabled(enabled) { h.lintEvents.push({ type: 'setEnabled', enabled }); }
+      configure() { h.lintEvents.push({ type: 'configure' }); }
+      selectTool() { h.lintEvents.push({ type: 'selectTool' }); }
+      selectManualTool() { h.lintEvents.push({ type: 'selectManualTool' }); }
+    } },
   };
   vm.runInNewContext(extensionSource, {
     module, exports: module.exports, process: { platform: process.platform }, Buffer,
@@ -343,6 +364,36 @@ test('project switch replaces source membership, watchers, backend ownership, an
   assert.equal(h.state.get('project').absolutePath, h.xpr('B'));
   assert.equal(h.state.get('project').relativePath, path.join('..', 'B', 'B.xpr'));
   assert.equal(h.contexts.get('fpgaWorkbench.loaded'), true);
+});
+
+test('lint pending state survives same-project refresh and resets on a different project', timeout, async t => {
+  const h = harness(t);
+  await h.app.selectProject(h.xpr('A'));
+  assert.equal(h.lintEvents.filter(event => event.type === 'reset').length, 1);
+  h.lintEvents.length = 0;
+  await h.app.refresh();
+  assert.deepEqual(h.lintEvents, [{ type: 'projectChanged', loading: true }, { type: 'projectChanged', loading: false }]);
+  await h.app.selectProject(h.xpr('B'));
+  assert.deepEqual(h.lintEvents.slice(2), [
+    { type: 'reset' }, { type: 'projectChanged', loading: true }, { type: 'projectChanged', loading: false }
+  ]);
+});
+
+test('refresh during an in-flight project load keeps its lint request without treating it as a project switch', timeout, async t => {
+  const h = harness(t), entered = deferred(), release = deferred();
+  await h.app.selectProject(h.xpr('A'));
+  h.lintEvents.length = 0;
+  h.load = async xpr => { entered.resolve(); await release.promise; return h.makeProject(xpr); };
+  const switching = h.app.selectProject(h.xpr('B'));
+  await entered.promise;
+  assert.equal(h.app.project, undefined);
+  assert.equal(h.app.loadTarget, h.xpr('B'));
+  const refreshing = h.app.refresh();
+  release.resolve();
+  await Promise.all([switching, refreshing]);
+  assert.equal(h.app.project.name, 'B');
+  assert.equal(h.lintEvents.filter(event => event.type === 'reset').length, 1);
+  assert.equal(h.lintEvents.at(-1).loading, false);
 });
 
 test('cancelling the project picker leaves the current project and overrides intact', timeout, async t => {
@@ -687,6 +738,113 @@ test('FPGA goto explicitly lists signal candidates and leaves module navigation 
   assert.equal(navigation.args[2].length,2);assert.equal(navigation.args[3],'goto');assert.equal(navigation.args[5],false);
 });
 
+function connectionPreviewFixture(h) {
+  const previous = h.text;
+  const connections = ['.o_data(w_bus)', '.i_data                    ( w_bus )', '.i_tabs\t\t\t(w_bus)',
+    '.i_same(w_bus)', '.o_same(w_bus)', '.i_pair({w_bus,w_bus})'];
+  h.text = name => name === 'A' ? [
+    'module A_top;',
+    'wire w_bus;',
+    'endpoint u0(',
+    `  ${connections[0]},`,
+    `  ${connections[1]},`,
+    `  ${connections[2]},`,
+    `  ${connections[3]}, ${connections[4]},`,
+    `  ${connections[5]}`,
+    ');',
+    'endmodule',
+    'module endpoint(output wire o_data, input wire i_data, input wire i_tabs,',
+    '  input wire i_same, output wire o_same, input wire [1:0] i_pair);',
+    'endmodule',
+    '',
+  ].join('\n') : previous(name);
+  const select = marker => {
+    const document = h.document('A'), offset = document.getText().indexOf(marker);
+    assert(offset >= 0, `fixture marker exists: ${marker}`);
+    document.offsetAt = position => position ? h.app.offset(document.getText(), position) : offset;
+    const position = h.app.position(document.getText(), offset);
+    h.vscode.window.activeTextEditor = { document, selection: { active: position } };
+    return { document, position };
+  };
+  return { connections, select };
+}
+
+function selectedLocationText(h, item) {
+  const uri = item.targetUri || item.uri;
+  const range = item.targetSelectionRange || item.range || item.targetRange;
+  const text = h.app.texts.get(canonical(uri.fsPath));
+  return text.slice(h.app.offset(text, range.start), h.app.offset(text, range.end));
+}
+
+for (const backend of ['builtin', 'semantic']) {
+  test(`${backend} definition provider shows complete aligned connections while raw signal references stay exact`, timeout, async t => {
+    const h = harness(t), fixture = connectionPreviewFixture(h);
+    await h.app.selectProject(h.xpr('A'));
+    h.app.backend.running = false;
+    const selected = fixture.select('w_bus;');
+    const raw = await h.app.definitions(selected.document, selected.position);
+    assert.equal(raw.length, 8, 'declaration and seven signal occurrences');
+    assert(raw.every(item => selectedLocationText(h, item) === 'w_bus'));
+    const originalRanges = JSON.stringify(raw);
+    if (backend === 'semantic') {
+      const linked = raw.map(item => ({ targetUri: item.uri, targetSelectionRange: item.range,
+        targetRange: new h.vscode.Range(h.app.position(selected.document.getText(), 0), h.app.position(selected.document.getText(), selected.document.getText().length)) }));
+      h.app.backend.running = true;
+      h.definition = async () => [linked[0]];
+      h.reference = async () => linked.slice(1);
+    }
+    const displayed = await h.definitionProvider.provideDefinition(selected.document, selected.position, { isCancellationRequested: false });
+    assert.deepEqual(Array.from(displayed, item => selectedLocationText(h, item)), ['w_bus', ...fixture.connections]);
+    assert.equal(JSON.stringify(raw), originalRanges, 'display conversion never mutates raw positions');
+    const after = await h.app.definitions(selected.document, selected.position);
+    assert.equal(after.length, 8, 'two occurrences inside one connection remain distinct internally');
+    assert(after.every(item => selectedLocationText(h, item) === 'w_bus'));
+    const displayedReferences = await h.referenceProvider.provideReferences(selected.document, selected.position,
+      { includeDeclaration: false }, { isCancellationRequested: false });
+    assert.deepEqual(Array.from(displayedReferences, item => selectedLocationText(h, item)), fixture.connections);
+  });
+}
+
+test('mouse goto and reference commands use the same complete connection list without merging adjacent ports', timeout, async t => {
+  const h = harness(t), fixture = connectionPreviewFixture(h);
+  await h.app.selectProject(h.xpr('A'));
+  h.app.backend.running = false;
+  fixture.select('w_bus;');
+  await h.commands.get('fpgaWorkbench.gotoDefinition')();
+  const goto = h.executions.findLast(item => item.name === 'editor.action.goToLocations');
+  assert.equal(goto.args[3], 'peek');
+  assert.deepEqual(Array.from(goto.args[2], item => selectedLocationText(h, item)), ['w_bus', ...fixture.connections]);
+  await h.commands.get('fpgaWorkbench.parentConnections')();
+  const references = h.executions.findLast(item => item.name === 'editor.action.showReferences');
+  assert.deepEqual(Array.from(references.args[2], item => selectedLocationText(h, item)), ['w_bus', ...fixture.connections]);
+  const sameLine = goto.args[2].filter(item => ['.i_same(w_bus)', '.o_same(w_bus)'].includes(selectedLocationText(h, item)));
+  assert.equal(sameLine.length, 2);
+  assert.equal(sameLine[0].range.start.line, sameLine[1].range.start.line);
+  assert.notEqual(sameLine[0].range.start.character, sameLine[1].range.start.character);
+  const selected = fixture.select('endpoint u0');
+  const module = await h.definitionProvider.provideDefinition(selected.document, selected.position, { isCancellationRequested: false });
+  assert.deepEqual(Array.from(module, item => selectedLocationText(h, item)), ['endpoint']);
+  await h.commands.get('fpgaWorkbench.gotoDefinition')();
+  const moduleGoto = h.executions.findLast(item => item.name === 'editor.action.goToLocations');
+  assert.equal(moduleGoto.args[3], 'goto');
+  assert.deepEqual(Array.from(moduleGoto.args[2], item => selectedLocationText(h, item)), ['endpoint']);
+});
+
+test('mouse peek expands confirmed upper connections but keeps the child port local target exact', timeout, async t => {
+  const h = harness(t), query = reverseNavigationFixture(h), previous = h.text;
+  h.text = name => name === 'A' ? previous(name).replace('.clk(sys_clk)', '.clk                    (sys_clk)').replace('.clk(other_clk)', '.clk\t\t(other_clk)') : previous(name);
+  await h.app.selectProject(h.xpr('A'));
+  h.app.backend.running = false;
+  const selected = query('clk');
+  const raw = await h.app.peekDefinitions(selected.document, selected.position);
+  assert.deepEqual(Array.from(raw, item => selectedLocationText(h, item)), ['clk', 'sys_clk', 'other_clk']);
+  h.vscode.window.activeTextEditor = { document: selected.document, selection: { active: selected.position } };
+  await h.commands.get('fpgaWorkbench.peekDefinition')();
+  const peek = h.executions.findLast(item => item.name === 'editor.action.goToLocations');
+  assert.deepEqual(Array.from(peek.args[2], item => selectedLocationText(h, item)), ['clk', '.clk                    (sys_clk)', '.clk\t\t(other_clk)']);
+  assert.deepEqual(Array.from(raw, item => selectedLocationText(h, item)), ['clk', 'sys_clk', 'other_clk']);
+});
+
 test('peek parent lookup discards stale project and edited document results, and honors cancellation', timeout, async t => {
   const h = harness(t), query = reverseNavigationFixture(h);
   await h.app.selectProject(h.xpr('A'));
@@ -854,6 +1012,26 @@ test('failed XPR selection clears the view and remains retryable and closable', 
   assertClosed(h);
 });
 
+test('lint commands route persistent switches and the status configuration menu', timeout, async t => {
+  const h = harness(t);
+  assert.equal(h.lintState, h.context.workspaceState);
+  await h.vscode.commands.executeCommand('fpgaWorkbench.enableLint');
+  await h.vscode.commands.executeCommand('fpgaWorkbench.disableLint');
+  await h.vscode.commands.executeCommand('fpgaWorkbench.configureLint');
+  await h.vscode.commands.executeCommand('fpgaWorkbench.selectLintTool');
+  await h.vscode.commands.executeCommand('fpgaWorkbench.selectManualLintTool');
+  assert.deepEqual(h.lintEvents, [
+    { type: 'setEnabled', enabled: true },
+    { type: 'setEnabled', enabled: false },
+    { type: 'configure' },
+    { type: 'selectTool' },
+    { type: 'selectManualTool' }
+  ]);
+  const snapshot = {enabled: true, status: '完成', tool: 'xvlog', diagnostics: []};
+  h.publishLint(snapshot);
+  assert.equal(h.lintSnapshot, snapshot, 'controller changes reach the sidebar');
+});
+
 test('dispose during startup cannot revive the backend or accept a later load', timeout, async t => {
   const h = harness(t), entered = deferred(), release = deferred();
   h.start = async () => { entered.resolve(); await release.promise; };
@@ -870,4 +1048,74 @@ test('dispose during startup cannot revive the backend or accept a later load', 
   assert.equal(await h.app.load(h.xpr('B')), false);
   assert.deepEqual(h.starts, ['A']);
   assert.ok(h.backendEvents.lastIndexOf('stop') > h.backendEvents.indexOf('started:A'));
+});
+
+
+test('multiline parameterized module reverse candidates include the module type for both backends', timeout, async t => {
+  for (const semantic of [false, true]) {
+    const h = harness(t), query = reverseNavigationFixture(h), previous = h.text;
+    h.text = name => name === 'A' ? 'module A_top;\nchild #(\n .W(f(2, (3)))) first(.clk(sys_clk));\nchild #(\n .W(8)\n) second(.clk(other_clk));\nendmodule' : previous(name);
+    await h.app.selectProject(h.xpr('A'));
+    h.app.backend.running = semantic;
+    if (semantic) h.app.backend.parentConnections = async () =>
+      h.app.index.modules().find(mod => mod.name === 'A_top').instances.map(instance => { const loc = h.app.location(instance); return {targetUri:loc.uri, targetRange:loc.range, targetSelectionRange:loc.range}; });
+    const {document, position} = query('child');
+    const results = await h.app.definitions(document, position);
+    assert.equal(results.length, 2);
+    const text = h.text('A');
+    const spans = results.map(item => text.slice(h.app.offset(text, (item.targetSelectionRange || item.range).start), h.app.offset(text, (item.targetSelectionRange || item.range).end)));
+    assert(spans.every(value => value.startsWith('child #(')));
+    assert(spans[0].endsWith('first')); assert(spans[1].endsWith('second'));
+    assert.deepEqual(h.app.previewLocations(results).map(item => item.range), results.map(item => item.range));
+  }
+});
+
+
+test('summary definition provider returns a read-only page without opening UI during hover', timeout, async t => {
+  const h=harness(t), query=reverseNavigationFixture(h), previous=h.text;
+  h.text=name=>name==='A' ? 'module A_top; child #(\n.W(8)) first(.clk(sys_clk)), second(.clk(other_clk)); endmodule' : previous(name);
+  h.candidateMode='summary'; await h.app.selectProject(h.xpr('A')); h.app.backend.running=false;
+  let opens=0; h.vscode.window.showTextDocument=async()=>{opens++;};
+  const {document,position}=query('child');
+  const result=await h.definitionProvider.provideDefinition(document,position);
+  assert.equal(result.length,1); assert.equal(result[0].uri.scheme,'fpga-candidates'); assert.equal(opens,0);
+  const content=h.candidateProvider.provideTextDocumentContent(result[0].uri);
+  assert(content.includes('child #() first (\nchild #() second ('));
+  assert(!content.includes('.W(8)'));
+  const again=await h.definitionProvider.provideDefinition(document,position);
+  assert.equal(again[0].uri.toString(),result[0].uri.toString());
+  const lenses=h.candidateLensProvider.provideCodeLenses({uri:result[0].uri}); assert.equal(lenses.length,2);
+  const target=h.candidateDefinitionProvider.provideDefinition({uri:result[0].uri},{line:3,character:2});
+  assert.equal(target.uri.fsPath,h.source('A'));
+  const source=h.text('A');assert.equal(source.slice(h.app.offset(source,target.range.start),h.app.offset(source,target.range.end)),'second');
+  await h.commands.get('fpgaWorkbench.openCandidate')(...lenses[0].command.arguments);assert.equal(opens,1);
+  h.app.sourceRevision++;
+  assert.equal(h.candidateDefinitionProvider.provideDefinition({uri:result[0].uri},{line:3}),undefined);
+  await h.commands.get('fpgaWorkbench.openCandidate')(...lenses[0].command.arguments);assert.equal(opens,1);
+  assert(h.logs.some(line=>line.includes('候选列表已过期')));
+  h.candidateMode='native';
+  const native=await h.definitionProvider.provideDefinition(document,position);assert.equal(native.length,2);assert(native.every(item=>item.uri.scheme==='file'));
+});
+
+test('summary port rows omit parameter lists and project closure invalidates candidate jumps', timeout, async t => {
+  const h=harness(t),query=reverseNavigationFixture(h);h.candidateMode='summary';
+  await h.app.selectProject(h.xpr('A'));h.app.backend.running=false;
+  const {document,position}=query('clk');const result=await h.definitionProvider.provideDefinition(document,position);
+  const content=h.candidateProvider.provideTextDocumentContent(result[0].uri);
+  assert(content.includes('child first (.clk(sys_clk))'));assert(content.includes('child second (.clk(other_clk))'));
+  assert(!content.includes('#()'));
+  await h.app.closeProject();
+  assert.equal(h.candidateDefinitionProvider.provideDefinition({uri:result[0].uri},{line:3}),undefined);
+});
+
+test('summary parameters include named instance overrides and keep native mode available', timeout, async t => {
+  const h=harness(t),query=reverseNavigationFixture(h),previous=h.text;
+  h.text=name=>name==='child' ? 'module child #(parameter W=8)(input wire clk); endmodule'
+    : name==='A' ? 'module A_top; child #(.W(11)) a(.clk(clk)); child #(.W(12)) b(.clk(clk)); endmodule' : previous(name);
+  h.candidateMode='summary';await h.app.selectProject(h.xpr('A'));h.app.backend.running=false;
+  const {document,position}=query('W');
+  const result=await h.definitionProvider.provideDefinition(document,position);
+  const content=h.candidateProvider.provideTextDocumentContent(result[0].uri);
+  assert(content.includes('child #(.W(11)) a'));assert(content.includes('child #(.W(12)) b'));
+  const manifest=require('../package.json');assert.equal(manifest.contributes.configuration.properties['fpgaWorkbench.navigation.candidateList'].default,'native');
 });

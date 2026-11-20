@@ -320,3 +320,23 @@ test('bundled slang resolves external project modules, local nets, named ports, 
     const disk = await fs.readFile(childPath);
     assert.ok(disk.includes(Buffer.from([0xd6, 0xd0, 0xce, 0xc4])));
   });
+
+
+test('parameter summaries require an elaborated Param member and a unique unconditional override', async () => {
+  const file=path.resolve('parameter-owner.v'),parent=path.resolve('parameter-parent.v');
+  const uri=pathToFileURL(file).href,parentUri=pathToFileURL(parent).href;
+  const text='module child #(parameter W=8)(); endmodule';
+  const index=new HdlIndex(); index.update(file,text);const owner=index.modules()[0],declaration=owner.symbols.find(symbol=>symbol.name==='W');
+  let parentText='module top; child #(.W(11)) u(); endmodule';
+  const pos=character=>({line:0,character});
+  const member={kind:'Param',instName:'W',instLoc:{uri,range:{start:pos(declaration.start),end:pos(declaration.end)}}};
+  const request=()=>resolveElaboratedParentConnections({uri,text,position:pos(declaration.start),query:{module:owner,declaration},readText:async()=>parentText,
+    execute:async(command)=>command==='slang.getInstancesOfModule' ? [{instPath:'top.u'}] : [{kind:'Scope',instName:'top',children:[{
+      kind:'Instance',instName:'u',declName:'child',declLoc:{uri,range:{start:pos(0),end:pos(text.length)}},
+      instLoc:{uri:parentUri,range:{start:pos(parentText.indexOf('u();')),end:pos(parentText.indexOf('u();')+1)}},children:[member]
+    }]}]});
+  const results=await request();assert.equal(results.length,1);
+  assert.equal(parentText.slice(results[0].targetSelectionRange.start.character,results[0].targetSelectionRange.end.character),'W');
+  member.kind='Port';assert.deepEqual(await request(),[]);member.kind='Param';
+  parentText='module top; child #(.W(11), .W(12)) u(); endmodule';assert.deepEqual(await request(),[]);
+});

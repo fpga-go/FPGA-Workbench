@@ -9,9 +9,32 @@
 - **工程文件**：从 `.xpr` 读取文件集、路径、顶层、include 目录和宏定义；IP 归入所属的 `sources_1/ip`，源文件按实际目录逐级展开；导出 Filelist 时附工程信息及 IP 路径注释。
 - **模块层级**：展开实例关系，点击模块进入源码。
 - **长代码阅读**：使用 VS Code 原生 Sticky Scroll，将当前模块声明固定在编辑器顶部，单击标题返回声明行。
-- **语法着色**：分别提供 Verilog / SystemVerilog 规则，覆盖宏、数值、实例、函数及常见 SV 类型和断言结构；颜色跟随当前主题。
+- **缩略图标题**：输入 `fpga-mark` 插入中文标题。
+  原生缩略图会放大显示该标题。
+  `fpga-region` 插入可折叠的中文分区。
+- **语法着色**：深色、浅色和高对比模式默认跟随当前主题。
+  插件提供语法分类，主题决定具体颜色。
+  Verilog 和 SystemVerilog 使用独立词法规则。
+  原生括号配色区分 begin/end 嵌套层级。
+  选中文字和选中背景沿用主题设置。
+  `fpgaWorkbench.highlighting.mode` 可切换为 `fixed`。
+  固定模式保留此前的深浅配色和选中注释色。
+  运行“选择语法配色方案”可切换方案。
+  `custom` 模式支持自定义深浅配色。
 - **定义与引用**：按住 `Ctrl` 并用鼠标左键点击：模块进入源码，信号列出本模块定义与引用，端口另列上一层实际实例的同名端口。模块名声明继续支持反查上层实例；右键 FPGA 速览菜单可查看实际连接信号。
 - **切换与关闭**：在侧栏切换工程或关闭当前工程，保留已打开文件和未保存内容。
+- **语法检查**：默认关闭，可在左侧 Lint 中启用。
+  手动检查优先使用已加载 XPR 的文件清单。
+  工程内文件按当前语言选择检查范围。
+  检查 Verilog/SV 时不启动 VHDL 编译器。
+  工程检查无需先打开 HDL 文件。
+  启用后，保存 HDL 文件会自动检查。
+  支持 Verilog、SystemVerilog 和 VHDL 编译检查。
+  自动查找 PATH 工具，也可手动指定工具文件。
+  错误和警告在左侧分组显示。
+  日志末尾分别汇总错误和警告。
+  默认忽略 timescale 警告。
+  工具需要单独安装，详见[语法检查说明](docs/LINT.md)。
 
 ## 三步开始
 
@@ -34,3 +57,12 @@
 作者 **fpga-go** · 原始代码 **MIT** · [第三方许可](https://github.com/fpga-go/FPGA-Workbench/blob/v0.2.11/THIRD_PARTY_NOTICES.txt)
 
 [仓库](https://github.com/fpga-go/FPGA-Workbench) · [问题](https://github.com/fpga-go/FPGA-Workbench/issues) · [许可证](https://github.com/fpga-go/FPGA-Workbench/blob/main/LICENSE.txt) · [主页](https://github.com/fpga-go/FPGA-Workbench/tree/develop#readme) · [市场](https://marketplace.visualstudio.com/items?itemName=fpga-go.fpga-workbench)
+
+### 精简候选列表
+
+默认使用原生跳转和候选列表。
+选择 summary 后，才会打开只读候选页。
+模块、参数和端口分别显示精简摘要。
+点击“跳转到源码”可定位原文件。
+`fpgaWorkbench.navigation.candidateList` 可切换显示方式。
+设为 `native` 可恢复原生候选列表。

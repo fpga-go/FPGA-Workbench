@@ -11,9 +11,10 @@ function visit(name) {
   const license=fs.readdirSync(dir).find(n=>/^licen[sc]e(?:\..*)?$/i.test(n));
   const licensePath=license ? path.join(dir,license) : path.join(root,'vendor/licenses',name.replace(/^@/,'').replace(/[^a-zA-Z0-9._-]+/g,'-')+'.txt');
   if(!fs.existsSync(licensePath))throw new Error(`Missing license for ${name}`);
-  notices.push(`${name} ${pkg.version} (${pkg.license})\n${fs.readFileSync(licensePath,'utf8')}`);
+  const extraNotice=path.join(dir,'NOTICES.txt');
+  notices.push(`${name} ${pkg.version} (${pkg.license})\n${fs.readFileSync(licensePath,'utf8')}${fs.existsSync(extraNotice) ? '\n'+fs.readFileSync(extraNotice,'utf8') : ''}`);
   for(const dep of Object.keys(pkg.dependencies || {}))visit(dep);
 }
-visit('fast-xml-parser');
+for(const name of Object.keys(JSON.parse(fs.readFileSync(path.join(root,'package.json'),'utf8')).dependencies || {}))visit(name);
 notices.push('HDL syntax grammars:\n'+fs.readFileSync(path.join(root,'vendor/licenses/hdl-grammars.txt'),'utf8'));
 fs.writeFileSync(path.join(root,'THIRD_PARTY_NOTICES.txt'),notices.join('\n\n----------------------------------------\n\n'));
