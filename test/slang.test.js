@@ -116,7 +116,7 @@ test('bundled slang reverse navigation uses actual parents across instances, gen
     await fs.mkdir(sources);
     const topPath = path.join(sources, 'top.sv');
     const childPath = path.join(sources, 'child.sv');
-    const top = [
+    let top = [
       'module top;',
       '  wire clk, other_clk, sys_clk, clock_in; wire [7:0] bus; wire [3:0] data_in;',
       '  child first(.clk(clk));',
@@ -157,7 +157,7 @@ test('bundled slang reverse navigation uses actual parents across instances, gen
       'module decoy(input wire clk); endmodule',
       ''
     ].join('\n');
-    const child = [
+    let child = [
       '`ifdef OFF',
       'module child(input wire clk);',
       'endmodule',
@@ -176,6 +176,13 @@ test('bundled slang reverse navigation uses actual parents across instances, gen
       'module expression_child(input wire clock_in, input wire [3:0] data_in, input wire empty_in); endmodule',
       ''
     ].join('\n');
+    top = top.replace('endmodule', [
+      '`define ACTIVE_PARENT', '`ifdef ACTIVE_PARENT',
+      'guarded_child guarded(.clk(sys_clk));',
+      'guarded_child nested(', '`ifdef OFF', '.clk(other_clk)', '`endif', ');',
+      '`endif', 'endmodule'
+    ].join('\n'));
+    child += '\nmodule guarded_child(input logic clk); wire used=clk; endmodule\n';
     await fs.writeFile(topPath, top); await fs.writeFile(childPath, child);
     const build = path.join(cache, 'project.f');
     await fs.writeFile(build, semanticFilelist({ top: 'top', sourceFiles: [topPath, childPath] }));
@@ -213,6 +220,12 @@ test('bundled slang reverse navigation uses actual parents across instances, gen
         execute: (command, args) => client.request('workspace/executeCommand', { command, arguments: args }),
         readText: async uri => sameUri(uri, childUri) ? child : top });
     };
+    const guardedPorts = await reverse('guarded_child', 'port', 'clk', undefined, undefined, {target:'port'});
+    assert.equal(guardedPorts.length, 1, 'active enclosing branch is safe; inactive nested port is not');
+    const guardedLine = top.split('\n')[guardedPorts[0].targetSelectionRange.start.line];
+    assert(guardedLine.includes('guarded(.clk(sys_clk))'));
+    const guardedExpression = await reverse('guarded_child', 'port', 'clk', undefined, undefined, {target:'expression'});
+    assert(guardedExpression.some(item => {const r=item.targetSelectionRange; return top.split('\n')[r.start.line].slice(r.start.character,r.end.character)==='sys_clk';}));
     const parents = await reverse('child', 'module');
     assert.deepEqual(parents.map(item => item.targetSelectionRange.start.line).sort((a, b) => a - b), [2, 3, 6, 14, 16]);
     assert.deepEqual(parents.map(item => top.split('\n')[item.targetSelectionRange.start.line]

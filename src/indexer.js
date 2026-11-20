@@ -26,6 +26,8 @@ function tokenize(text) {
   const tokens = [];
   let i = 0;
   let conditionalDepth = 0;
+  const conditionalBranches = [];
+  let branchSerial = 0;
   let hasDirectives = false;
   while (i < text.length) {
     const ch = text[i];
@@ -43,7 +45,7 @@ function tokenize(text) {
         if (text[i] === '\\') { i += 2; continue; }
         if (text[i++] === '"') break;
       }
-      tokens.push({ value: '', start, end: i, kind: 'literal', conditional: conditionalDepth > 0 });
+      tokens.push({ value: '', start, end: i, kind: 'literal', conditionalContext: conditionalBranches.join('/'), conditional: conditionalDepth > 0 });
       continue;
     }
     if (ch === '`') {
@@ -53,8 +55,9 @@ function tokenize(text) {
       const directives = new Set(['define', 'undef', 'ifdef', 'ifndef', 'elsif', 'else', 'endif', 'include', 'timescale', 'default_nettype', 'resetall', 'celldefine', 'endcelldefine', 'line', 'pragma', 'begin_keywords', 'end_keywords', 'unconnected_drive', 'nounconnected_drive']);
       if (directives.has(word)) {
         hasDirectives = true;
-        if (word === 'ifdef' || word === 'ifndef') conditionalDepth++;
-        if (word === 'endif') conditionalDepth = Math.max(0, conditionalDepth - 1);
+        if (word === 'ifdef' || word === 'ifndef') { conditionalDepth++; conditionalBranches.push(++branchSerial); }
+        if ((word === 'else' || word === 'elsif') && conditionalBranches.length) conditionalBranches[conditionalBranches.length - 1] = ++branchSerial;
+        if (word === 'endif') { conditionalDepth = Math.max(0, conditionalDepth - 1); conditionalBranches.pop(); }
         let end;
         do {
           end = text.indexOf('\n', i);
@@ -65,7 +68,7 @@ function tokenize(text) {
         } while (i < text.length);
         continue;
       }
-      tokens.push({ value: text.slice(start, i), start, end: i, kind: 'macro', conditional: conditionalDepth > 0 });
+      tokens.push({ value: text.slice(start, i), start, end: i, kind: 'macro', conditionalContext: conditionalBranches.join('/'), conditional: conditionalDepth > 0 });
       continue;
     }
     let kind = 'punctuation';
@@ -86,7 +89,7 @@ function tokenize(text) {
     } else if (text.startsWith('::', i)) {
       i += 2; value = '::';
     } else { i++; value = ch; }
-    tokens.push({ value, start, end: i, kind, conditional: conditionalDepth > 0, ...(escaped ? { escaped: true } : {}) });
+    tokens.push({ value, start, end: i, kind, conditionalContext: conditionalBranches.join('/'), conditional: conditionalDepth > 0, ...(escaped ? { escaped: true } : {}) });
   }
   return { tokens, hasDirectives };
 }
@@ -264,7 +267,7 @@ function namedConnections(mod, start, end, kind) {
     if (tokens[from]?.value !== '.' || tokens[from + 1]?.kind !== 'identifier') continue;
     const name = tokens[from + 1];
     const complete = tokens[from + 2]?.value === '(' && pairs.get(from + 2) === to - 1;
-    result.push({ ...location(mod.path, name, kind), conditional: !!name.conditional, expressionStart: tokens[from + 2]?.end ?? name.end, expressionEnd: tokens[to - 1]?.start ?? name.end, implicit: tokens[from + 2]?.value !== '(',
+    result.push({ ...location(mod.path, name, kind), conditional: !!name.conditional, conditionalContext: name.conditionalContext, expressionStart: tokens[from + 2]?.end ?? name.end, expressionEnd: tokens[to - 1]?.start ?? name.end, implicit: tokens[from + 2]?.value !== '(',
       ...(complete ? { connectionStart: tokens[from].start, connectionEnd: tokens[to - 1].end } : {}) });
   }
   return result;
@@ -325,6 +328,7 @@ function parseInstances(mod, scope, start, limit) {
     const end = pairs.get(i);
     if (end >= limit) return undefined;
     instances.push({ ...location(mod.path, name, 'instance'), type: type.value, typeStart: type.start, typeEnd: type.end,
+      conditionalContext: type.conditionalContext,
       parameterized: tokens[start + 1]?.value === '#',
       scopeId: scope.id, conditional: !!type.conditional || scope.generated, ports: namedConnections(mod, i + 1, end, 'port'), parameters,
       bodyStart: type.start, bodyEnd: tokens[end].end });
