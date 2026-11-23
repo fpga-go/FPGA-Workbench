@@ -1,6 +1,6 @@
 # FPGA Workbench · 工程导航
 
-任意目录打开文件夹，选中 Vivado (Xilinx) .xpr 或 Diamond (Lattice) .lpf / .ldf，剩下的交给我吧。
+任意目录打开文件夹，选中工程文件，剩下的交给我吧。
 
 在 VS Code 中打开现有 Vivado (Xilinx) 或 Diamond (Lattice) 工程，浏览文件、查看模块层级，跳转 Verilog/SystemVerilog 定义。
 
