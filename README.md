@@ -2,7 +2,12 @@
 
 任意目录打开文件夹，选中工程文件，剩下的交给我吧。
 
-在 VS Code 中打开现有 Vivado (Xilinx) 或 Diamond (Lattice) 工程，浏览文件、查看模块层级，跳转 Verilog/SystemVerilog 定义。
+已支持类型：
+- **Vivado (Xilinx)**：`.xpr`
+- **Diamond (Lattice)**：`.lpf` / `.ldf`
+- **Filelist / All Files**：`.f` / `*.*`（选择未知类型文件时按 Filelist 解析）
+
+在 VS Code 中打开现有 Vivado (Xilinx)、Diamond (Lattice) 或 Filelist 工程，浏览文件、查看模块层级，跳转 Verilog/SystemVerilog 定义。
 
 ## 选中工程，即可导航
 

@@ -791,12 +791,154 @@ function candidateNetlist(xci, xpr, designFileset) {
   return path.join(root, `${stem}.gen`, directory, `${name}_sim_netlist.v`);
 }
 
+async function loadFilelistProject(filelistPath, options = {}) {
+  const projectRoot = path.dirname(filelistPath);
+  const projectName = path.basename(filelistPath, path.extname(filelistPath)) || path.basename(filelistPath);
+  const filesetName = options.fileset || 'sources_1';
+  if (options.fileset && !['sources_1', 'impl1', 'filelist'].includes(options.fileset)) {
+    throw new Error(`找不到 fileset：${options.fileset}`);
+  }
+  const content = await readSource(filelistPath, 'auto');
+  if (/\0/.test(content)) throw new Error('Filelist 包含不支持的空字符或二进制内容。');
+  const source = content.replace(/^\uFEFF/, '');
+  let commentTop = '';
+  const topMatch = source.match(/^\s*\/\/\s*Top:\s*([A-Za-z_][A-Za-z0-9_$]*)\s*$/m);
+  if (topMatch && topMatch[1] !== 'not') commentTop = topMatch[1];
+
+  const tokens = [];
+  let i = 0;
+  while (i < source.length) {
+    const ch = source[i];
+    if (/\s/.test(ch)) { i++; continue; }
+    if (ch === '#' || source.startsWith('//', i)) {
+      const end = source.indexOf('\n', i + 1);
+      i = end < 0 ? source.length : end + 1;
+      continue;
+    }
+    if (source.startsWith('/*', i)) {
+      const end = source.indexOf('*/', i + 2);
+      if (end < 0) throw new Error('Filelist 中存在未闭合的块注释。');
+      i = end + 2;
+      continue;
+    }
+    if (ch === '"') {
+      let value = '';
+      i++;
+      let closed = false;
+      while (i < source.length) {
+        if (source[i] === '\\' && i + 1 < source.length && source[i + 1] === '"') {
+          value += '"'; i += 2; continue;
+        }
+        if (source[i] === '\r' || source[i] === '\n') break;
+        if (source[i] === '"') { closed = true; i++; break; }
+        value += source[i++];
+      }
+      if (!closed) throw new Error('Filelist 中存在未闭合的引号。');
+      if (value.trim()) tokens.push(value.trim());
+      continue;
+    }
+    const start = i;
+    while (i < source.length && !/[\s"]/.test(source[i]) && !source.startsWith('//', i) && !source.startsWith('/*', i)) i++;
+    const token = source.slice(start, i);
+    if (token) tokens.push(token);
+  }
+
+  const warnings = [];
+  const includeDirs = [];
+  const defines = [];
+  const rawFiles = [];
+  let explicitTop = '';
+  const addInclude = raw => {
+    if (!raw || !raw.trim()) return;
+    try { includeDirs.push(resolveXprPath(raw.trim(), filelistPath)); }
+    catch (error) { warnings.push(error.message); }
+  };
+  const valueFlags = new Set(['--error-limit', '-timescale', '--timescale', '-work', '--work', '-L']);
+  for (let idx = 0; idx < tokens.length; idx++) {
+    const tok = tokens[idx];
+    if (tok.startsWith('+incdir+')) {
+      for (const dir of tok.slice('+incdir+'.length).split('+').filter(Boolean)) addInclude(dir);
+    } else if (tok.startsWith('+define+')) {
+      for (const def of tok.slice('+define+'.length).split('+').filter(Boolean)) defines.push(def);
+    } else if (tok === '-I' || tok === '--incdir' || tok === '-incdir' || tok === '-y') {
+      if (tokens[idx + 1]) addInclude(tokens[++idx]);
+    } else if (tok.startsWith('-I') && tok.length > 2) {
+      addInclude(tok.slice(2));
+    } else if (tok === '-D' || tok === '--define' || tok === '-define') {
+      if (tokens[idx + 1]) defines.push(tokens[++idx]);
+    } else if (tok.startsWith('-D') && tok.length > 2) {
+      defines.push(tok.slice(2));
+    } else if (tok === '--top' || tok === '-top') {
+      if (tokens[idx + 1]) explicitTop = tokens[++idx];
+    } else if (tok === '-v') {
+      if (tokens[idx + 1]) rawFiles.push(tokens[++idx]);
+    } else if (valueFlags.has(tok)) {
+      idx++;
+    } else if (tok.startsWith('-') || tok.startsWith('+')) {
+      continue;
+    } else {
+      rawFiles.push(tok);
+    }
+  }
+
+  const includeSimulation = Boolean(options.includeSimulation);
+  const files = [];
+  for (const rawPath of rawFiles) {
+    let resolved = null;
+    try { resolved = resolveXprPath(rawPath, filelistPath); }
+    catch (error) { warnings.push(`${filesetName}：${error.message}`); }
+    files.push({
+      path: resolved,
+      rawPath,
+      fileset: filesetName,
+      type: inferredType(rawPath),
+      exists: false,
+      existence: 'unknown',
+      enabled: true,
+      usedIn: ['synthesis', 'simulation'],
+      library: 'work',
+      generated: false,
+      selected: true,
+    });
+  }
+  await Promise.all(files.map(async file => {
+    if (file.path) {
+      try { file.exists = await isFile(file.path); file.existence = file.exists ? 'exists' : 'missing'; }
+      catch (error) { warnings.push(`无法检查文件 ${file.path}：${error.message}`); }
+    }
+    if (file.path && !file.exists && file.enabled && file.selected) warnings.push(`工程文件不存在：${file.path}`);
+  }));
+  const sourceFiles = unique(files.filter(file => file.enabled && file.selected && file.exists && HDL_EXTENSIONS.has(path.extname(file.path).toLowerCase())).map(file => file.path));
+  for (const dir of array(options.includeDirs)) addInclude(String(dir));
+  for (const def of array(options.defines)) if (def && String(def).trim()) defines.push(String(def).trim());
+  for (const file of sourceFiles.filter(file => /\.(vh|svh)$/i.test(file))) includeDirs.push(path.dirname(file));
+  const top = explicitTop || commentTop || await inferTopFromSources(sourceFiles, null, projectName);
+  return {
+    path: filelistPath,
+    root: projectRoot,
+    name: projectName,
+    part: '',
+    vivadoVersion: '',
+    projectType: 'filelist',
+    top,
+    filesets: [{ name: filesetName, type: 'DesignSrcs', top, srcSets: [] }],
+    selectedFilesets: [filesetName],
+    files,
+    sourceFiles,
+    ipReferences: [],
+    includeSimulation,
+    includeDirs: unique(includeDirs),
+    defines: [...new Set(defines)],
+    warnings: [...new Set(warnings)],
+  };
+}
+
 /** Read a project without launching Vivado/Diamond or modifying any project file. */
 async function loadProject(xprPath, options = {}) {
   const projectPath = path.resolve(xprPath);
   const ext = path.extname(projectPath).toLowerCase();
   if (ext === '.lpf' || ext === '.ldf') return loadLatticeProject(projectPath, options);
-  if (ext !== '.xpr') throw new Error('请选择 Vivado (.xpr) 或 Lattice (.lpf / .ldf) 工程文件。');
+  if (ext !== '.xpr') return loadFilelistProject(projectPath, options);
   const xml = await fs.readFile(projectPath, 'utf8');
   if (/<!DOCTYPE\b|<!ENTITY\b/i.test(xml)) throw new Error('XPR 不支持 DTD 或自定义实体声明。');
   const validity = XMLValidator.validate(xml);

@@ -3485,11 +3485,168 @@ var require_xpr = __commonJS({
       const directory = relative && relative !== ".." && !relative.startsWith(`..${path2.sep}`) && !path2.isAbsolute(relative) ? path2.dirname(relative) : path2.join(designFileset, "ip", name);
       return path2.join(root, `${stem}.gen`, directory, `${name}_sim_netlist.v`);
     }
+    async function loadFilelistProject(filelistPath, options = {}) {
+      const projectRoot = path2.dirname(filelistPath);
+      const projectName = path2.basename(filelistPath, path2.extname(filelistPath)) || path2.basename(filelistPath);
+      const filesetName = options.fileset || "sources_1";
+      if (options.fileset && !["sources_1", "impl1", "filelist"].includes(options.fileset)) {
+        throw new Error(`\u627E\u4E0D\u5230 fileset\uFF1A${options.fileset}`);
+      }
+      const content = await readSource(filelistPath, "auto");
+      if (/\0/.test(content)) throw new Error("Filelist \u5305\u542B\u4E0D\u652F\u6301\u7684\u7A7A\u5B57\u7B26\u6216\u4E8C\u8FDB\u5236\u5185\u5BB9\u3002");
+      const source = content.replace(/^\uFEFF/, "");
+      let commentTop = "";
+      const topMatch = source.match(/^\s*\/\/\s*Top:\s*([A-Za-z_][A-Za-z0-9_$]*)\s*$/m);
+      if (topMatch && topMatch[1] !== "not") commentTop = topMatch[1];
+      const tokens = [];
+      let i = 0;
+      while (i < source.length) {
+        const ch = source[i];
+        if (/\s/.test(ch)) {
+          i++;
+          continue;
+        }
+        if (ch === "#" || source.startsWith("//", i)) {
+          const end = source.indexOf("\n", i + 1);
+          i = end < 0 ? source.length : end + 1;
+          continue;
+        }
+        if (source.startsWith("/*", i)) {
+          const end = source.indexOf("*/", i + 2);
+          if (end < 0) throw new Error("Filelist \u4E2D\u5B58\u5728\u672A\u95ED\u5408\u7684\u5757\u6CE8\u91CA\u3002");
+          i = end + 2;
+          continue;
+        }
+        if (ch === '"') {
+          let value = "";
+          i++;
+          let closed = false;
+          while (i < source.length) {
+            if (source[i] === "\\" && i + 1 < source.length && source[i + 1] === '"') {
+              value += '"';
+              i += 2;
+              continue;
+            }
+            if (source[i] === "\r" || source[i] === "\n") break;
+            if (source[i] === '"') {
+              closed = true;
+              i++;
+              break;
+            }
+            value += source[i++];
+          }
+          if (!closed) throw new Error("Filelist \u4E2D\u5B58\u5728\u672A\u95ED\u5408\u7684\u5F15\u53F7\u3002");
+          if (value.trim()) tokens.push(value.trim());
+          continue;
+        }
+        const start = i;
+        while (i < source.length && !/[\s"]/.test(source[i]) && !source.startsWith("//", i) && !source.startsWith("/*", i)) i++;
+        const token = source.slice(start, i);
+        if (token) tokens.push(token);
+      }
+      const warnings = [];
+      const includeDirs = [];
+      const defines = [];
+      const rawFiles = [];
+      let explicitTop = "";
+      const addInclude = (raw) => {
+        if (!raw || !raw.trim()) return;
+        try {
+          includeDirs.push(resolveXprPath(raw.trim(), filelistPath));
+        } catch (error) {
+          warnings.push(error.message);
+        }
+      };
+      const valueFlags = /* @__PURE__ */ new Set(["--error-limit", "-timescale", "--timescale", "-work", "--work", "-L"]);
+      for (let idx = 0; idx < tokens.length; idx++) {
+        const tok = tokens[idx];
+        if (tok.startsWith("+incdir+")) {
+          for (const dir of tok.slice("+incdir+".length).split("+").filter(Boolean)) addInclude(dir);
+        } else if (tok.startsWith("+define+")) {
+          for (const def of tok.slice("+define+".length).split("+").filter(Boolean)) defines.push(def);
+        } else if (tok === "-I" || tok === "--incdir" || tok === "-incdir" || tok === "-y") {
+          if (tokens[idx + 1]) addInclude(tokens[++idx]);
+        } else if (tok.startsWith("-I") && tok.length > 2) {
+          addInclude(tok.slice(2));
+        } else if (tok === "-D" || tok === "--define" || tok === "-define") {
+          if (tokens[idx + 1]) defines.push(tokens[++idx]);
+        } else if (tok.startsWith("-D") && tok.length > 2) {
+          defines.push(tok.slice(2));
+        } else if (tok === "--top" || tok === "-top") {
+          if (tokens[idx + 1]) explicitTop = tokens[++idx];
+        } else if (tok === "-v") {
+          if (tokens[idx + 1]) rawFiles.push(tokens[++idx]);
+        } else if (valueFlags.has(tok)) {
+          idx++;
+        } else if (tok.startsWith("-") || tok.startsWith("+")) {
+          continue;
+        } else {
+          rawFiles.push(tok);
+        }
+      }
+      const includeSimulation = Boolean(options.includeSimulation);
+      const files = [];
+      for (const rawPath of rawFiles) {
+        let resolved = null;
+        try {
+          resolved = resolveXprPath(rawPath, filelistPath);
+        } catch (error) {
+          warnings.push(`${filesetName}\uFF1A${error.message}`);
+        }
+        files.push({
+          path: resolved,
+          rawPath,
+          fileset: filesetName,
+          type: inferredType(rawPath),
+          exists: false,
+          existence: "unknown",
+          enabled: true,
+          usedIn: ["synthesis", "simulation"],
+          library: "work",
+          generated: false,
+          selected: true
+        });
+      }
+      await Promise.all(files.map(async (file) => {
+        if (file.path) {
+          try {
+            file.exists = await isFile(file.path);
+            file.existence = file.exists ? "exists" : "missing";
+          } catch (error) {
+            warnings.push(`\u65E0\u6CD5\u68C0\u67E5\u6587\u4EF6 ${file.path}\uFF1A${error.message}`);
+          }
+        }
+        if (file.path && !file.exists && file.enabled && file.selected) warnings.push(`\u5DE5\u7A0B\u6587\u4EF6\u4E0D\u5B58\u5728\uFF1A${file.path}`);
+      }));
+      const sourceFiles = unique(files.filter((file) => file.enabled && file.selected && file.exists && HDL_EXTENSIONS.has(path2.extname(file.path).toLowerCase())).map((file) => file.path));
+      for (const dir of array(options.includeDirs)) addInclude(String(dir));
+      for (const def of array(options.defines)) if (def && String(def).trim()) defines.push(String(def).trim());
+      for (const file of sourceFiles.filter((file2) => /\.(vh|svh)$/i.test(file2))) includeDirs.push(path2.dirname(file));
+      const top = explicitTop || commentTop || await inferTopFromSources(sourceFiles, null, projectName);
+      return {
+        path: filelistPath,
+        root: projectRoot,
+        name: projectName,
+        part: "",
+        vivadoVersion: "",
+        projectType: "filelist",
+        top,
+        filesets: [{ name: filesetName, type: "DesignSrcs", top, srcSets: [] }],
+        selectedFilesets: [filesetName],
+        files,
+        sourceFiles,
+        ipReferences: [],
+        includeSimulation,
+        includeDirs: unique(includeDirs),
+        defines: [...new Set(defines)],
+        warnings: [...new Set(warnings)]
+      };
+    }
     async function loadProject2(xprPath, options = {}) {
       const projectPath = path2.resolve(xprPath);
       const ext = path2.extname(projectPath).toLowerCase();
       if (ext === ".lpf" || ext === ".ldf") return loadLatticeProject(projectPath, options);
-      if (ext !== ".xpr") throw new Error("\u8BF7\u9009\u62E9 Vivado (.xpr) \u6216 Lattice (.lpf / .ldf) \u5DE5\u7A0B\u6587\u4EF6\u3002");
+      if (ext !== ".xpr") return loadFilelistProject(projectPath, options);
       const xml = await fs2.readFile(projectPath, "utf8");
       if (/<!DOCTYPE\b|<!ENTITY\b/i.test(xml)) throw new Error("XPR \u4E0D\u652F\u6301 DTD \u6216\u81EA\u5B9A\u4E49\u5B9E\u4F53\u58F0\u660E\u3002");
       const validity = XMLValidator.validate(xml);

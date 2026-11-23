@@ -292,3 +292,36 @@ test('loads standalone .lpf project without .ldf and infers top module from cons
   assert.ok(slangF.includes(topFile.replace(/\\/g, '/')));
   assert.ok(slangF.includes(subFile.replace(/\\/g, '/')));
 });
+
+test('loads unknown file extension as a Filelist project with incdir, defines, top and relative source paths', async t => {
+  const root = await makeFixtureDir(t, 'filelist-unknown-ext-');
+  await fs.mkdir(path.join(root, 'rtl folder'), { recursive: true });
+  await fs.mkdir(path.join(root, 'inc'), { recursive: true });
+  await fs.writeFile(path.join(root, 'inc/cfg.vh'), '`define BUS_W 8\n');
+  await fs.writeFile(path.join(root, 'rtl folder/leaf.v'), 'module leaf(input wire clk); endmodule\n');
+  await fs.writeFile(path.join(root, 'rtl folder/fl_top.v'), 'module fl_top(input wire clk); leaf u_leaf(.clk(clk)); endmodule\n');
+
+  const customList = path.join(root, 'design.customlist');
+  await fs.writeFile(
+    customList,
+    [
+      '// Top: fl_top',
+      '# Comment line',
+      '+incdir+inc',
+      '+define+SYNTHESIS+MODE=1',
+      '-D EXTRA_DEF',
+      '"rtl folder/leaf.v"',
+      '"rtl folder/fl_top.v"',
+    ].join('\n')
+  );
+
+  const loaded = await loadProject(customList);
+  assert.equal(loaded.projectType, 'filelist');
+  assert.equal(loaded.top, 'fl_top');
+  assert.deepEqual(
+    loaded.sourceFiles,
+    ['rtl folder/leaf.v', 'rtl folder/fl_top.v'].map(p => path.join(root, p))
+  );
+  assert.deepEqual(loaded.includeDirs, [path.join(root, 'inc')]);
+  assert.deepEqual(loaded.defines, ['SYNTHESIS', 'MODE=1', 'EXTRA_DEF']);
+});

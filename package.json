@@ -1,8 +1,8 @@
 {
   "name": "fpga-workbench",
   "displayName": "FPGA Workbench · 工程导航",
-  "description": "打开 Vivado (Xilinx) .xpr 或 Diamond (Lattice) .lpf/.ldf 工程，浏览工程文件和模块层级，跳转 Verilog/SystemVerilog 模块、端口与信号。",
-  "version": "0.2.32",
+  "description": "任意目录打开文件夹，选中工程文件，剩下的交给我吧。",
+  "version": "0.2.33",
   "publisher": "fpga-go",
   "icon": "media/fpga-go-marketplace.png",
   "galleryBanner": {
@@ -206,13 +206,18 @@
     "viewsWelcome": [
       {
         "view": "fpgaWorkbench.files",
-        "contents": "任意目录打开文件夹，选中工程文件，剩下的交给我吧。\n[工程类型：Vivado (Xilinx)](command:fpgaWorkbench.selectProjectType)\n[选择工程 (.xpr)](command:fpgaWorkbench.selectProject)",
-        "when": "!fpgaWorkbench.hasProject && fpgaWorkbench.projectType != 'lattice'"
+        "contents": "任意目录打开文件夹，选中工程文件，剩下的交给我吧。\n已支持：Vivado (Xilinx) .xpr · Diamond (Lattice) .lpf / .ldf · Filelist\n[工程类型：Vivado (Xilinx)](command:fpgaWorkbench.selectProjectType)\n[选择工程 (.xpr / All Files)](command:fpgaWorkbench.selectProject)",
+        "when": "!fpgaWorkbench.hasProject && fpgaWorkbench.projectType != 'lattice' && fpgaWorkbench.projectType != 'filelist'"
       },
       {
         "view": "fpgaWorkbench.files",
-        "contents": "任意目录打开文件夹，选中工程文件，剩下的交给我吧。\n[工程类型：Diamond (Lattice)](command:fpgaWorkbench.selectProjectType)\n[选择工程 (.lpf / .ldf)](command:fpgaWorkbench.selectProject)",
+        "contents": "任意目录打开文件夹，选中工程文件，剩下的交给我吧。\n已支持：Vivado (Xilinx) .xpr · Diamond (Lattice) .lpf / .ldf · Filelist\n[工程类型：Diamond (Lattice)](command:fpgaWorkbench.selectProjectType)\n[选择工程 (.lpf / .ldf / All Files)](command:fpgaWorkbench.selectProject)",
         "when": "!fpgaWorkbench.hasProject && fpgaWorkbench.projectType == 'lattice'"
+      },
+      {
+        "view": "fpgaWorkbench.files",
+        "contents": "任意目录打开文件夹，选中工程文件，剩下的交给我吧。\n已支持：Vivado (Xilinx) .xpr · Diamond (Lattice) .lpf / .ldf · Filelist\n[工程类型：Filelist / All Files](command:fpgaWorkbench.selectProjectType)\n[选择工程 (All Files → Filelist)](command:fpgaWorkbench.selectProject)",
+        "when": "!fpgaWorkbench.hasProject && fpgaWorkbench.projectType == 'filelist'"
       }
     ],
     "menus": {
@@ -395,14 +400,16 @@
           "type": "string",
           "enum": [
             "vivado",
-            "lattice"
+            "lattice",
+            "filelist"
           ],
           "enumDescriptions": [
             "Vivado (Xilinx) 工程 (.xpr)",
-            "Diamond (Lattice) 工程 (.lpf / .ldf)"
+            "Diamond (Lattice) 工程 (.lpf / .ldf)",
+            "Filelist / All Files（未知类型按 Filelist 解析）"
           ],
           "default": "vivado",
-          "description": "工程类型选择开关：Vivado (Xilinx) 工程或 Diamond (Lattice) 工程。"
+          "description": "工程类型选择开关：Vivado (Xilinx) 工程、Diamond (Lattice) 工程或 Filelist。"
         },
         "fpgaWorkbench.highlighting.mode": {
           "type": "string",

@@ -72,18 +72,19 @@ class Workbench {
   }
   config() { return vscode.workspace.getConfiguration('fpgaWorkbench'); }
   syncProjectTypeContext() {
-    const type = this.projectType === 'lattice' ? 'lattice' : 'vivado';
+    const type = ['vivado','lattice','filelist'].includes(this.projectType) ? this.projectType : 'vivado';
     return vscode.commands.executeCommand('setContext','fpgaWorkbench.projectType',type);
   }
   async selectProjectType(requested) {
     const revision = this.revision;
-    let type = requested === 'vivado' || requested === 'lattice' ? requested : undefined;
+    let type = ['vivado','lattice','filelist'].includes(requested) ? requested : undefined;
     if(!type) {
-      const current = this.projectType === 'lattice' ? 'lattice' : 'vivado';
+      const current = ['vivado','lattice','filelist'].includes(this.projectType) ? this.projectType : 'vivado';
       const picked = await vscode.window.showQuickPick([
         {label:'Vivado (Xilinx) 工程',description:`.xpr${current==='vivado'?'（当前）':''}`,value:'vivado'},
-        {label:'Diamond (Lattice) 工程',description:`.lpf / .ldf${current==='lattice'?'（当前）':''}`,value:'lattice'}
-      ],{title:'选择工程类型：Vivado (Xilinx) 或 Diamond (Lattice)'});
+        {label:'Diamond (Lattice) 工程',description:`.lpf / .ldf${current==='lattice'?'（当前）':''}`,value:'lattice'},
+        {label:'Filelist / 所有文件',description:`.f / *.*（未知类型按 Filelist 解析）${current==='filelist'?'（当前）':''}`,value:'filelist'}
+      ],{title:'选择工程类型：Vivado (Xilinx) / Diamond (Lattice) / Filelist'});
       if(!picked || !this.isCurrent(revision)) return;
       type = picked.value;
     }
@@ -92,7 +93,8 @@ class Workbench {
       this.context.workspaceState.update('projectType',type),
       this.syncProjectTypeContext()
     ]);
-    this.output.appendLine(`工程类型：${type === 'lattice' ? 'Diamond (Lattice)' : 'Vivado (Xilinx)'}`);
+    const label = type === 'lattice' ? 'Diamond (Lattice)' : type === 'filelist' ? 'Filelist / 所有文件' : 'Vivado (Xilinx)';
+    this.output.appendLine(`工程类型：${label}`);
     return type;
   }
   candidateText(uri) { return uri.scheme === 'file' && this.members.has(key(uri.fsPath)) ? this.texts.get(key(uri.fsPath)) : undefined; }
@@ -106,14 +108,18 @@ class Workbench {
   async selectProject(uri) {
     if (!uri) {
       const revision = this.revision;
-      const isLattice = (this.projectType || this.config().get('projectType','vivado')) === 'lattice';
-      const picked = await vscode.window.showOpenDialog({
-        title: isLattice ? '选择 Diamond (Lattice) 工程 (.lpf / .ldf)' : '选择 Vivado (Xilinx) 工程 (.xpr)',
-        filters: isLattice
-          ? {'Diamond (Lattice) 工程':['lpf','ldf'],'Vivado (Xilinx) 工程':['xpr']}
-          : {'Vivado (Xilinx) 工程':['xpr'],'Diamond (Lattice) 工程':['lpf','ldf']},
-        canSelectMany:false
-      });
+      const type = this.projectType || this.config().get('projectType','vivado');
+      const filters = type === 'lattice'
+        ? {'Diamond (Lattice) 工程':['lpf','ldf'],'Vivado (Xilinx) 工程':['xpr'],'All Files (按 Filelist 解析)':['*']}
+        : type === 'filelist'
+          ? {'All Files (按 Filelist 解析)':['*'],'Vivado (Xilinx) 工程':['xpr'],'Diamond (Lattice) 工程':['lpf','ldf']}
+          : {'Vivado (Xilinx) 工程':['xpr'],'Diamond (Lattice) 工程':['lpf','ldf'],'All Files (按 Filelist 解析)':['*']};
+      const title = type === 'lattice'
+        ? '选择 Diamond (Lattice) 工程 (.lpf / .ldf)'
+        : type === 'filelist'
+          ? '选择 Filelist 或任意工程文件'
+          : '选择 Vivado (Xilinx) 工程 (.xpr)';
+      const picked = await vscode.window.showOpenDialog({title,filters,canSelectMany:false});
       if(!picked?.length || !this.isCurrent(revision)) return;
       uri = picked[0];
     }
@@ -121,6 +127,7 @@ class Workbench {
     const ext = path.extname(xpr).toLowerCase();
     if(ext === '.lpf' || ext === '.ldf') { this.projectType = 'lattice'; void this.syncProjectTypeContext(); }
     else if(ext === '.xpr') { this.projectType = 'vivado'; void this.syncProjectTypeContext(); }
+    else { this.projectType = 'filelist'; void this.syncProjectTypeContext(); }
     this.fileset = undefined; this.top = undefined;
     const loading = this.load(xpr), revision = this.revision;
     if(!await loading || !this.isCurrent(revision)) return;
