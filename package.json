@@ -21,9 +21,12 @@
   "keywords": [
     "FPGA",
     "Vivado",
+    "Lattice",
     "Verilog",
     "SystemVerilog",
-    "XPR"
+    "XPR",
+    "LPF",
+    "LDF"
   ],
   "main": "./dist/extension.js",
   "activationEvents": [
@@ -96,13 +99,13 @@
       },
       {
         "command": "fpgaWorkbench.selectProject",
-        "title": "选择 Vivado 工程 (.xpr)",
+        "title": "选择 FPGA 工程 (.xpr / .lpf / .ldf)",
         "category": "FPGA",
         "icon": "$(folder-opened)"
       },
       {
         "command": "fpgaWorkbench.switchProject",
-        "title": "切换工程 (.xpr)",
+        "title": "切换工程 (.xpr / .lpf / .ldf)",
         "category": "FPGA",
         "icon": "$(folder-opened)"
       },
@@ -197,7 +200,7 @@
     "viewsWelcome": [
       {
         "view": "fpgaWorkbench.files",
-        "contents": "任意目录打开文件夹，选中.xpr，剩下的交给我吧。\n[选择 .xpr](command:fpgaWorkbench.selectProject)",
+        "contents": "任意目录打开文件夹，选中 .xpr / .lpf / .ldf，剩下的交给我吧。\n[选择工程](command:fpgaWorkbench.selectProject)",
         "when": "!fpgaWorkbench.hasProject"
       }
     ],

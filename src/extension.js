@@ -76,7 +76,7 @@ class Workbench {
   async selectProject(uri) {
     if (!uri) {
       const revision = this.revision;
-      const picked = await vscode.window.showOpenDialog({title:'选择 Vivado 工程',filters:{'Vivado 工程':['xpr']},canSelectMany:false});
+      const picked = await vscode.window.showOpenDialog({title:'选择 FPGA 工程',filters:{'FPGA 工程':['xpr','lpf','ldf'],'Vivado 工程':['xpr'],'Lattice 工程':['lpf','ldf']},canSelectMany:false});
       if(!picked?.length || !this.isCurrent(revision)) return;
       uri = picked[0];
     }
@@ -235,6 +235,8 @@ class Workbench {
   installWatchers() {
     const paths = new Set(this.project.files.filter(f=>f.path).map(f=>f.path));
     paths.add(this.project.path);
+    if(this.project.ldfPath) paths.add(this.project.ldfPath);
+    if(this.project.lpfPath) paths.add(this.project.lpfPath);
     const watchedKeys = new Set([...paths].map(key));
     const dirs = new Set([...paths].map(p=>path.dirname(p)));
     for(const dir of this.project.includeDirs) dirs.add(dir);
@@ -551,7 +553,8 @@ class Workbench {
     const uri=await vscode.window.showSaveDialog({title:'导出工程源文件清单',defaultUri:vscode.Uri.file(path.join(this.project.root,`${this.project.name}-sources.f`)),filters:{Filelist:['f']}});
     if(!uri || !this.isCurrent(revision))return;
     const ipInputs=(this.project.ipReferences || []).flatMap(ip=>[ip.path,...(ip.artifactPaths || [])]).filter(Boolean);
-    const protectedKeys=new Set([this.project.path,...this.project.files.map(f=>f.path).filter(Boolean),...ipInputs].map(key));
+    const extraInputs=[this.project.ldfPath,this.project.lpfPath].filter(Boolean);
+    const protectedKeys=new Set([this.project.path,...extraInputs,...this.project.files.map(f=>f.path).filter(Boolean),...ipInputs].map(key));
     if(protectedKeys.has(key(uri.fsPath)))throw new Error('导出路径指向工程输入文件，请选择其他文件名。');
     await vscode.workspace.fs.writeFile(uri,Buffer.from(filelist(this.project,path.dirname(uri.fsPath),{outputPath:uri.fsPath,top:this.top || this.project.top}),'utf8'));
     await vscode.window.showTextDocument(uri);
@@ -566,6 +569,7 @@ class Workbench {
     if(!this.project) return this.selectProject();
     const p=this.project;
     this.output.appendLine(`\n工程：${p.name}\nXPR：${p.path}\n根目录：${p.root}\n器件：${p.part || '未知'}\nVivado：${p.vivadoVersion || '未知'}\n顶层：${this.top || p.top || '自动'}\n后端：${this.backend.status || (this.backend.running?'slang':'结构索引')}\n源文件：${p.sourceFiles.length}\ninclude：${p.includeDirs.join('; ')}\n宏定义：${p.defines.join('; ')}`);
+    if(p.projectType==='lattice' && p.lpf)this.output.appendLine(`LPF 约束：${p.lpfPath || p.path}（LOCATE ${p.lpf.locates.length}，IOBUF ${p.lpf.iobufs.length}，FREQUENCY ${p.lpf.frequencies.length}）`);
     for(const f of vscode.workspace.workspaceFolders || [])this.output.appendLine(`工作区 ${f.name} → XPR：${slash(path.relative(f.uri.fsPath,p.path))}`);
     for(const w of p.warnings)this.output.appendLine(`提示：${w}`);
     const counts=this.backend.diagnosticsCounts;
