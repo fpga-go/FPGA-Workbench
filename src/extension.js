@@ -33,6 +33,8 @@ class Workbench {
     context.subscriptions.push(this.candidates);
     this.fileset = context.workspaceState.get('fileset');
     this.top = context.workspaceState.get('top');
+    this.projectType = context.workspaceState.get('projectType') || this.config().get('projectType','vivado');
+    void this.syncProjectTypeContext();
     this.output = vscode.window.createOutputChannel('FPGA Workbench');
     this.change = new vscode.EventEmitter();
     this.status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 15);
@@ -50,6 +52,10 @@ class Workbench {
       vscode.workspace.onDidOpenTextDocument(d=>this.changedDocument(d)),
       vscode.workspace.onDidCloseTextDocument(d=>this.closedDocument(d)),
       vscode.workspace.onDidChangeConfiguration(e=> {
+        if(e.affectsConfiguration('fpgaWorkbench.projectType') && !this.context.workspaceState.get('projectType')) {
+          this.projectType = this.config().get('projectType','vivado');
+          void this.syncProjectTypeContext();
+        }
         if(['backend','slangPath','sourceEncoding','includeSimulation','extraIncludeDirs','extraDefines','watchFiles']
           .some(name=>e.affectsConfiguration(`fpgaWorkbench.${name}`))) this.scheduleRefresh();
       }),
@@ -65,6 +71,32 @@ class Workbench {
       {dispose:()=>this.dispose()});
   }
   config() { return vscode.workspace.getConfiguration('fpgaWorkbench'); }
+  syncProjectTypeContext() {
+    const type = ['vivado','lattice','filelist'].includes(this.projectType) ? this.projectType : 'vivado';
+    return vscode.commands.executeCommand('setContext','fpgaWorkbench.projectType',type);
+  }
+  async selectProjectType(requested) {
+    const revision = this.revision;
+    let type = ['vivado','lattice','filelist'].includes(requested) ? requested : undefined;
+    if(!type) {
+      const current = ['vivado','lattice','filelist'].includes(this.projectType) ? this.projectType : 'vivado';
+      const picked = await vscode.window.showQuickPick([
+        {label:'Vivado (Xilinx) 工程',description:`.xpr${current==='vivado'?'（当前）':''}`,value:'vivado'},
+        {label:'Diamond (Lattice) 工程',description:`.lpf / .ldf${current==='lattice'?'（当前）':''}`,value:'lattice'},
+        {label:'Filelist / 所有文件',description:`.f / *.*（未知类型按 Filelist 解析）${current==='filelist'?'（当前）':''}`,value:'filelist'}
+      ],{title:'选择工程类型：Vivado (Xilinx) / Diamond (Lattice) / Filelist'});
+      if(!picked || !this.isCurrent(revision)) return;
+      type = picked.value;
+    }
+    this.projectType = type;
+    await Promise.all([
+      this.context.workspaceState.update('projectType',type),
+      this.syncProjectTypeContext()
+    ]);
+    const label = type === 'lattice' ? 'Diamond (Lattice)' : type === 'filelist' ? 'Filelist / 所有文件' : 'Vivado (Xilinx)';
+    this.output.appendLine(`工程类型：${label}`);
+    return type;
+  }
   candidateText(uri) { return uri.scheme === 'file' && this.members.has(key(uri.fsPath)) ? this.texts.get(key(uri.fsPath)) : undefined; }
   candidatePage(items) { return this.config().get('navigation.candidateList','native') === 'summary' ? this.candidates.location(items) : undefined; }
   node(label, options={}) {
@@ -76,11 +108,26 @@ class Workbench {
   async selectProject(uri) {
     if (!uri) {
       const revision = this.revision;
-      const picked = await vscode.window.showOpenDialog({title:'选择 Vivado 工程',filters:{'Vivado 工程':['xpr']},canSelectMany:false});
+      const type = this.projectType || this.config().get('projectType','vivado');
+      const filters = type === 'lattice'
+        ? {'Diamond (Lattice) 工程':['lpf','ldf'],'Vivado (Xilinx) 工程':['xpr'],'All Files (按 Filelist 解析)':['*']}
+        : type === 'filelist'
+          ? {'All Files (按 Filelist 解析)':['*'],'Vivado (Xilinx) 工程':['xpr'],'Diamond (Lattice) 工程':['lpf','ldf']}
+          : {'Vivado (Xilinx) 工程':['xpr'],'Diamond (Lattice) 工程':['lpf','ldf'],'All Files (按 Filelist 解析)':['*']};
+      const title = type === 'lattice'
+        ? '选择 Diamond (Lattice) 工程 (.lpf / .ldf)'
+        : type === 'filelist'
+          ? '选择 Filelist 或任意工程文件'
+          : '选择 Vivado (Xilinx) 工程 (.xpr)';
+      const picked = await vscode.window.showOpenDialog({title,filters,canSelectMany:false});
       if(!picked?.length || !this.isCurrent(revision)) return;
       uri = picked[0];
     }
     const xpr = typeof uri === 'string' ? uri : uri.fsPath;
+    const ext = path.extname(xpr).toLowerCase();
+    if(ext === '.lpf' || ext === '.ldf') { this.projectType = 'lattice'; void this.syncProjectTypeContext(); }
+    else if(ext === '.xpr') { this.projectType = 'vivado'; void this.syncProjectTypeContext(); }
+    else { this.projectType = 'filelist'; void this.syncProjectTypeContext(); }
     this.fileset = undefined; this.top = undefined;
     const loading = this.load(xpr), revision = this.revision;
     if(!await loading || !this.isCurrent(revision)) return;
@@ -235,6 +282,8 @@ class Workbench {
   installWatchers() {
     const paths = new Set(this.project.files.filter(f=>f.path).map(f=>f.path));
     paths.add(this.project.path);
+    if(this.project.ldfPath) paths.add(this.project.ldfPath);
+    if(this.project.lpfPath) paths.add(this.project.lpfPath);
     const watchedKeys = new Set([...paths].map(key));
     const dirs = new Set([...paths].map(p=>path.dirname(p)));
     for(const dir of this.project.includeDirs) dirs.add(dir);
@@ -551,7 +600,8 @@ class Workbench {
     const uri=await vscode.window.showSaveDialog({title:'导出工程源文件清单',defaultUri:vscode.Uri.file(path.join(this.project.root,`${this.project.name}-sources.f`)),filters:{Filelist:['f']}});
     if(!uri || !this.isCurrent(revision))return;
     const ipInputs=(this.project.ipReferences || []).flatMap(ip=>[ip.path,...(ip.artifactPaths || [])]).filter(Boolean);
-    const protectedKeys=new Set([this.project.path,...this.project.files.map(f=>f.path).filter(Boolean),...ipInputs].map(key));
+    const extraInputs=[this.project.ldfPath,this.project.lpfPath].filter(Boolean);
+    const protectedKeys=new Set([this.project.path,...extraInputs,...this.project.files.map(f=>f.path).filter(Boolean),...ipInputs].map(key));
     if(protectedKeys.has(key(uri.fsPath)))throw new Error('导出路径指向工程输入文件，请选择其他文件名。');
     await vscode.workspace.fs.writeFile(uri,Buffer.from(filelist(this.project,path.dirname(uri.fsPath),{outputPath:uri.fsPath,top:this.top || this.project.top}),'utf8'));
     await vscode.window.showTextDocument(uri);
@@ -566,6 +616,7 @@ class Workbench {
     if(!this.project) return this.selectProject();
     const p=this.project;
     this.output.appendLine(`\n工程：${p.name}\nXPR：${p.path}\n根目录：${p.root}\n器件：${p.part || '未知'}\nVivado：${p.vivadoVersion || '未知'}\n顶层：${this.top || p.top || '自动'}\n后端：${this.backend.status || (this.backend.running?'slang':'结构索引')}\n源文件：${p.sourceFiles.length}\ninclude：${p.includeDirs.join('; ')}\n宏定义：${p.defines.join('; ')}`);
+    if(p.projectType==='lattice' && p.lpf)this.output.appendLine(`LPF 约束：${p.lpfPath || p.path}（LOCATE ${p.lpf.locates.length}，IOBUF ${p.lpf.iobufs.length}，FREQUENCY ${p.lpf.frequencies.length}）`);
     for(const f of vscode.workspace.workspaceFolders || [])this.output.appendLine(`工作区 ${f.name} → XPR：${slash(path.relative(f.uri.fsPath,p.path))}`);
     for(const w of p.warnings)this.output.appendLine(`提示：${w}`);
     const counts=this.backend.diagnosticsCounts;
@@ -603,7 +654,7 @@ function activate(context) {
   const linting = new HdlLinter(vscode, () => app.project, {state: context.workspaceState,onDidChange:snapshot=>lintView.update(snapshot)});
   app.linting = linting;
   context.subscriptions.push(linting,lintView);
-  const commands={selectProject:u=>app.selectProject(u),switchProject:u=>app.selectProject(typeof u === 'string' || (u?.scheme === 'file' && typeof u.fsPath === 'string') ? u : undefined),closeProject:()=>app.closeProject(),refresh:()=>app.refresh(),selectFileset:()=>app.chooseFileset(),selectTop:()=>app.chooseTop(),exportFilelist:()=>app.exportFilelist(),openFilelistSkill:()=>app.openFilelistSkill(),projectInfo:()=>app.info(),peekDefinition:()=>app.navigate(true),gotoDefinition:()=>app.navigate(false),parentConnections:()=>app.findReferences(),openLocation:l=>app.openLocation(l),openHierarchy:p=>app.backend.showHierarchy(p)};
+  const commands={selectProjectType:t=>app.selectProjectType(t),selectProject:u=>app.selectProject(u),switchProject:u=>app.selectProject(typeof u === 'string' || (u?.scheme === 'file' && typeof u.fsPath === 'string') ? u : undefined),closeProject:()=>app.closeProject(),refresh:()=>app.refresh(),selectFileset:()=>app.chooseFileset(),selectTop:()=>app.chooseTop(),exportFilelist:()=>app.exportFilelist(),openFilelistSkill:()=>app.openFilelistSkill(),projectInfo:()=>app.info(),peekDefinition:()=>app.navigate(true),gotoDefinition:()=>app.navigate(false),parentConnections:()=>app.findReferences(),openLocation:l=>app.openLocation(l),openHierarchy:p=>app.backend.showHierarchy(p)};
   for(const [name,handler] of Object.entries(commands)) context.subscriptions.push(vscode.commands.registerCommand(`fpgaWorkbench.${name}`,async(...args)=>{try{return await handler(...args);}catch(e){app.report(e);}}));
   context.subscriptions.push(vscode.commands.registerCommand('fpgaWorkbench.runLint',()=>linting.run()),
     vscode.commands.registerCommand('fpgaWorkbench.showLintOutput',()=>linting.showOutput()),

@@ -1,12 +1,17 @@
 # FPGA Workbench · 工程导航
 
-任意目录打开文件夹，选中.xpr，剩下的交给我吧。
+任意目录打开文件夹，选中工程文件，剩下的交给我吧。
 
-在 VS Code 中打开现有 Vivado 工程，浏览文件、查看模块层级，跳转 Verilog/SystemVerilog 定义。
+已支持类型：
+- **Vivado (Xilinx)**：`.xpr`
+- **Diamond (Lattice)**：`.lpf` / `.ldf`
+- **Filelist / All Files**：`.f` / `*.*`（选择未知类型文件时按 Filelist 解析）
+
+在 VS Code 中打开现有 Vivado (Xilinx)、Diamond (Lattice) 或 Filelist 工程，浏览文件、查看模块层级，跳转 Verilog/SystemVerilog 定义。
 
 ## 选中工程，即可导航
 
-- **工程文件**：从 `.xpr` 读取文件集、路径、顶层、include 目录和宏定义；IP 归入所属的 `sources_1/ip`，源文件按实际目录逐级展开；导出 Filelist 时附工程信息及 IP 路径注释。
+- **工程文件**：支持 **Vivado (Xilinx)**（`.xpr`）与 **Diamond (Lattice)**（`.lpf` / `.ldf`）工程类型选择开关；从工程文件读取文件集/Implementation、路径、顶层、include 目录、宏定义与 LPF 约束；IP 归入所属文件集，源文件按实际目录逐级展开；导出 Filelist 时附工程信息及 IP 路径注释。
 - **模块层级**：展开实例关系，点击模块进入源码。
 - **长代码阅读**：使用 VS Code 原生 Sticky Scroll，将当前模块声明固定在编辑器顶部，单击标题返回声明行。
 - **缩略图标题**：输入 `fpga-mark` 插入中文标题。
@@ -39,7 +44,7 @@
 ## 三步开始
 
 1. 在 VS Code 中打开任意工作文件夹，点击左侧 **FPGA Workbench** 芯片图标。
-2. 选择 Vivado `.xpr`，工程可以位于工作区内或其他目录。
+2. 选择工程类型（Vivado (Xilinx) `.xpr` 或 Diamond (Lattice) `.lpf` / `.ldf`）并选中工程文件，工程可以位于工作区内或其他目录。
 3. 点击文件开始编辑：`Ctrl + 鼠标左键` 跳转模块，或展开信号的本模块引用及上一层同名端口列表；点击列表中的位置即可查看源码。
 
 同时安装其他 HDL 导航插件时，可使用右键菜单中带 **FPGA** 前缀的命令，只查询当前工程。

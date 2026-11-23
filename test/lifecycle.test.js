@@ -1119,3 +1119,20 @@ test('summary parameters include named instance overrides and keep native mode a
   assert(content.includes('child #(.W(11)) a'));assert(content.includes('child #(.W(12)) b'));
   const manifest=require('../package.json');assert.equal(manifest.contributes.configuration.properties['fpgaWorkbench.navigation.candidateList'].default,'native');
 });
+
+test('project type switch toggles between Vivado (Xilinx) and Diamond (Lattice) and updates picker filter priority', timeout, async t => {
+  const h=harness(t);
+  assert.equal(h.contexts.get('fpgaWorkbench.projectType'),'vivado');
+  let dialogOptions;
+  h.openDialog=async options=>{dialogOptions=options;return undefined;};
+  await h.app.selectProject();
+  assert.match(dialogOptions.title,/Vivado \(Xilinx\)/);
+  assert.equal(Object.keys(dialogOptions.filters)[0],'Vivado (Xilinx) 工程');
+  h.vscode.window.showQuickPick=async items=>items.find(item=>item.value==='lattice');
+  await h.commands.get('fpgaWorkbench.selectProjectType')();
+  assert.equal(h.contexts.get('fpgaWorkbench.projectType'),'lattice');
+  assert.equal(h.state.get('projectType'),'lattice');
+  await h.app.selectProject();
+  assert.match(dialogOptions.title,/Diamond \(Lattice\)/);
+  assert.equal(Object.keys(dialogOptions.filters)[0],'Diamond (Lattice) 工程');
+});

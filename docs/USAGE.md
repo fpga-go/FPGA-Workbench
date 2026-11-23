@@ -1,16 +1,16 @@
 # FPGA Workbench 使用说明
 
-在 VS Code 中选择 Vivado `.xpr`，浏览工程文件、编辑 RTL、查看模块层级，并跳转 Verilog/SystemVerilog 模块、端口和信号定义。
+在 VS Code 中选择 Vivado (Xilinx) `.xpr` 或 Diamond (Lattice) `.lpf` / `.ldf` 工程，浏览工程文件、编辑 RTL、查看模块层级，并跳转 Verilog/SystemVerilog 模块、端口和信号定义。
 
 作者：**fpga-go** · 联系：[fpga_go@163.com](mailto:fpga_go@163.com)
 
-Windows x64 安装包自带 slang-server v0.3.0，无需另装 Python、Ctags 或语言服务。插件负责编辑导航；综合、实现、时序分析和硬件下载继续使用 Vivado。
+Windows x64 安装包自带 slang-server v0.3.0，无需另装 Python、Ctags 或语言服务。插件负责编辑导航；综合、实现、时序分析和硬件下载继续使用 Vivado 或 Lattice Diamond。
 
 ## 安装和开始使用
 
 1. 在 VS Code 扩展面板搜索 **FPGA Workbench**，确认发布者为 **fpga-go** 后安装正式版。新功能试用时可另选预发布版本；已有 VSIX 也可通过扩展面板右上角的 `…` →“从 VSIX 安装”打开。
 2. 打开日常使用的工作目录，点击左侧芯片图标 **FPGA Workbench**。
-3. 点击“选择 Vivado 工程 (.xpr)”，选择工程。工程可以位于工作区内，也可以位于其他目录。
+3. 在“工程文件”欢迎面板通过类型选择开关选择 **Vivado (Xilinx)**（`.xpr`）或 **Diamond (Lattice)**（`.lpf` / `.ldf`），点击选择工程。工程可以位于工作区内，也可以位于其他目录。
 4. 展开“工程文件”查看文件集和目录，展开“模块层级”查看实例。点击文件或模块即可编辑。
 
 “工程文件”标题栏的文件夹按钮用于**切换工程**，`×` 按钮用于**关闭工程**；右键工程名称也能执行这两个操作。取消选择会保留当前工程。关闭会清空两棵树、停止语义服务并清除工作区记住的工程；已打开文件和未保存内容保持原样。加载途中也可以关闭，之后可重新选择 `.xpr`。若选择的 XPR 读取失败，可刷新重试、切换或关闭。

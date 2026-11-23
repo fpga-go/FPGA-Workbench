@@ -1765,6 +1765,836 @@ var require_fxp = __commonJS({
   }
 });
 
+// src/encoding.js
+var require_encoding = __commonJS({
+  "src/encoding.js"(exports2, module2) {
+    "use strict";
+    var fs2 = require("node:fs/promises");
+    function decode(buffer, encoding = "auto") {
+      if (encoding !== "auto") return new TextDecoder(encoding).decode(buffer);
+      if (buffer[0] === 255 && buffer[1] === 254) return new TextDecoder("utf-16le").decode(buffer);
+      try {
+        return new TextDecoder("utf-8", { fatal: true }).decode(buffer);
+      } catch {
+        return new TextDecoder("gb18030").decode(buffer);
+      }
+    }
+    async function readSource(file, encoding) {
+      return decode(await fs2.readFile(file), encoding);
+    }
+    module2.exports = { decode, readSource };
+  }
+});
+
+// src/indexer.js
+var require_indexer = __commonJS({
+  "src/indexer.js"(exports2, module2) {
+    "use strict";
+    var path2 = require("node:path");
+    function fileKey(filePath) {
+      const windowsPath = process.platform === "win32" || /^[A-Za-z]:[\\/]/.test(filePath) || /^\\\\/.test(filePath);
+      return windowsPath ? path2.win32.resolve(filePath).toLowerCase() : path2.resolve(filePath);
+    }
+    var DECLARATIONS = new Set("input output inout ref wire tri tri0 tri1 wand wor triand trior trireg uwire supply0 supply1 reg logic bit byte shortint int longint integer time real realtime shortreal parameter localparam genvar".split(" "));
+    var DIRECTIONS = /* @__PURE__ */ new Set(["input", "output", "inout", "ref"]);
+    var KEYWORDS = new Set("module endmodule interface endinterface program endprogram package endpackage class endclass virtual automatic static signed unsigned const var rand randc struct union enum packed typedef type void function endfunction task endtask begin end generate endgenerate if else for foreach while repeat forever case casex casez endcase default assign always always_comb always_ff always_latch initial final return break continue fork join join_any join_none wait disable force release deassign specify endspecify import export modport clocking endclocking property endproperty sequence endsequence assert assume cover restrict bind alias defparam new local protected extern pure context do unique unique0 priority inside dist matches with let checker endchecker".split(" ").concat([...DECLARATIONS]));
+    var TYPE_WORDS = /* @__PURE__ */ new Set([...KEYWORDS, "string", "event", "chandle"]);
+    function location(path3, token, kind, extra = {}) {
+      return { path: path3, start: token.start, end: token.end, name: token.value, kind, ...extra };
+    }
+    function key(loc) {
+      return `${loc.path}\0${loc.start}\0${loc.end}`;
+    }
+    function unique(locations) {
+      return [...new Map(locations.map((loc) => [key(loc), loc])).values()];
+    }
+    function tokenize(text) {
+      const tokens = [];
+      let i = 0;
+      let conditionalDepth = 0;
+      const conditionalBranches = [];
+      let branchSerial = 0;
+      let hasDirectives = false;
+      while (i < text.length) {
+        const ch = text[i];
+        if (/\s/.test(ch)) {
+          i++;
+          continue;
+        }
+        if (text.startsWith("//", i)) {
+          const end = text.indexOf("\n", i + 2);
+          i = end < 0 ? text.length : end;
+          continue;
+        }
+        if (text.startsWith("/*", i)) {
+          const end = text.indexOf("*/", i + 2);
+          i = end < 0 ? text.length : end + 2;
+          continue;
+        }
+        const start = i;
+        if (ch === '"') {
+          i++;
+          while (i < text.length) {
+            if (text[i] === "\\") {
+              i += 2;
+              continue;
+            }
+            if (text[i++] === '"') break;
+          }
+          tokens.push({ value: "", start, end: i, kind: "literal", conditionalContext: conditionalBranches.join("/"), conditional: conditionalDepth > 0 });
+          continue;
+        }
+        if (ch === "`") {
+          i++;
+          while (/[A-Za-z0-9_$]/.test(text[i] || "") && i < text.length) i++;
+          const word = text.slice(start + 1, i);
+          const directives = /* @__PURE__ */ new Set(["define", "undef", "ifdef", "ifndef", "elsif", "else", "endif", "include", "timescale", "default_nettype", "resetall", "celldefine", "endcelldefine", "line", "pragma", "begin_keywords", "end_keywords", "unconnected_drive", "nounconnected_drive"]);
+          if (directives.has(word)) {
+            hasDirectives = true;
+            if (word === "ifdef" || word === "ifndef") {
+              conditionalDepth++;
+              conditionalBranches.push(++branchSerial);
+            }
+            if ((word === "else" || word === "elsif") && conditionalBranches.length) conditionalBranches[conditionalBranches.length - 1] = ++branchSerial;
+            if (word === "endif") {
+              conditionalDepth = Math.max(0, conditionalDepth - 1);
+              conditionalBranches.pop();
+            }
+            let end;
+            do {
+              end = text.indexOf("\n", i);
+              if (end < 0) {
+                i = text.length;
+                break;
+              }
+              const continued = text.slice(i, end).replace(/\r$/, "").endsWith("\\");
+              i = end + 1;
+              if (!continued) break;
+            } while (i < text.length);
+            continue;
+          }
+          tokens.push({ value: text.slice(start, i), start, end: i, kind: "macro", conditionalContext: conditionalBranches.join("/"), conditional: conditionalDepth > 0 });
+          continue;
+        }
+        let kind = "punctuation";
+        let escaped = false;
+        let value;
+        if (ch === "\\") {
+          i++;
+          while (i < text.length && !/\s/.test(text[i])) i++;
+          value = text.slice(start + 1, i);
+          kind = "identifier";
+          escaped = true;
+        } else if (/[A-Za-z_$]/.test(ch)) {
+          i++;
+          while (i < text.length && /[A-Za-z0-9_$]/.test(text[i])) i++;
+          value = text.slice(start, i);
+          kind = "identifier";
+        } else if (/[0-9]/.test(ch) || ch === "'" && /[sSbBoOdDhH01xXzZ]/.test(text[i + 1] || "")) {
+          i++;
+          while (i < text.length && /[A-Za-z0-9_'?.]/.test(text[i])) i++;
+          value = text.slice(start, i);
+          kind = "literal";
+        } else if (text.startsWith("::", i)) {
+          i += 2;
+          value = "::";
+        } else {
+          i++;
+          value = ch;
+        }
+        tokens.push({ value, start, end: i, kind, conditionalContext: conditionalBranches.join("/"), conditional: conditionalDepth > 0, ...escaped ? { escaped: true } : {} });
+      }
+      return { tokens, hasDirectives };
+    }
+    function matchingPairs(tokens) {
+      const pairs = /* @__PURE__ */ new Map();
+      const stack = [];
+      const expected = { ")": "(", "]": "[", "}": "{" };
+      for (let i = 0; i < tokens.length; i++) {
+        const value = tokens[i].value;
+        if (["(", "[", "{"].includes(value)) stack.push(i);
+        else if (expected[value] && stack.length && tokens[stack.at(-1)].value === expected[value]) {
+          const start = stack.pop();
+          pairs.set(start, i);
+          pairs.set(i, start);
+        }
+      }
+      return pairs;
+    }
+    function split(tokens, pairs, start, end, separator = ",") {
+      const parts = [];
+      let from = start;
+      for (let i = start; i < end; i++) {
+        if (["(", "[", "{"].includes(tokens[i].value) && pairs.has(i)) {
+          i = pairs.get(i);
+          continue;
+        }
+        if (tokens[i].value === separator) {
+          parts.push([from, i]);
+          from = i + 1;
+        }
+      }
+      parts.push([from, end]);
+      return parts;
+    }
+    function statementEnd(tokens, pairs, start, limit) {
+      for (let i = start; i < limit; i++) {
+        if (["(", "[", "{"].includes(tokens[i].value) && pairs.has(i)) {
+          i = pairs.get(i);
+          continue;
+        }
+        if (tokens[i].value === ";") return i;
+      }
+      return limit;
+    }
+    function addSymbol(mod, scope, token, kind, extras = {}) {
+      const symbol = location(mod.path, token, kind, { scopeId: scope.id, conditional: !!token.conditional, ...extras });
+      const existing = scope.symbols.filter((s) => s.name === symbol.name);
+      const replace = existing.find((s) => s.provisional);
+      if (replace && !symbol.provisional) {
+        scope.symbols.splice(scope.symbols.indexOf(replace), 1);
+        mod.symbols.splice(mod.symbols.indexOf(replace), 1);
+      } else if (existing.length && (!symbol.conditional || existing.some((s) => s.start === symbol.start))) {
+        const old = existing[0];
+        if (kind === "port" && old.kind !== "port") {
+          old.kind = "port";
+          old.direction = extras.direction;
+        }
+        return old;
+      }
+      scope.symbols.push(symbol);
+      mod.symbols.push(symbol);
+      return symbol;
+    }
+    function declarations(mod, scope, start, end, defaultKind, provisional = false) {
+      const { tokens, pairs } = mod.file;
+      let kind = defaultKind;
+      let direction;
+      for (const [from, to] of split(tokens, pairs, start, end)) {
+        let candidate;
+        let sawMacro = false;
+        for (let i = from; i < to; i++) {
+          const token = tokens[i];
+          if (token.value === "=") break;
+          if (["(", "[", "{"].includes(token.value) && pairs.has(i)) {
+            i = pairs.get(i);
+            continue;
+          }
+          if (DIRECTIONS.has(token.value)) {
+            kind = "port";
+            direction = token.value;
+            continue;
+          }
+          if (["parameter", "localparam"].includes(token.value)) {
+            kind = "parameter";
+            continue;
+          }
+          if (token.kind === "macro") sawMacro = true;
+          if (token.kind === "identifier" && !TYPE_WORDS.has(token.value)) candidate = token;
+        }
+        if (candidate && !sawMacro) addSymbol(mod, scope, candidate, kind || "signal", { ...direction ? { direction } : {}, ...provisional ? { provisional: true } : {} });
+      }
+    }
+    function newScope(mod, parent, token, kind, name) {
+      const scope = { id: mod.scopes.length, parent, kind, name, start: token.start, end: mod.bodyEnd, symbols: [], instances: [], children: [], generated: kind === "generate" || !!parent?.generated };
+      mod.scopes.push(scope);
+      if (parent) parent.children.push(scope);
+      return scope;
+    }
+    function parseModule(file, moduleStart, nameIndex, headerEnd, moduleEnd) {
+      const { tokens, pairs } = file;
+      const nameToken = tokens[nameIndex];
+      const mod = {
+        ...location(file.path, nameToken, "module"),
+        bodyStart: tokens[moduleStart].start,
+        bodyEnd: tokens[moduleEnd]?.end ?? file.text.length,
+        instances: [],
+        symbols: [],
+        warnings: [],
+        conditional: !!nameToken.conditional,
+        file,
+        scopes: [],
+        tokenScopes: /* @__PURE__ */ new Map(),
+        excluded: /* @__PURE__ */ new Set(),
+        portAliases: []
+      };
+      const root = newScope(mod, null, tokens[moduleStart], "module", mod.name);
+      let i = nameIndex + 1;
+      if (tokens[i]?.value === "#" && tokens[i + 1]?.value === "(" && pairs.has(i + 1)) {
+        const end = pairs.get(i + 1);
+        declarations(mod, root, i + 2, end, "parameter");
+        i = end + 1;
+      }
+      if (tokens[i]?.value === "(" && pairs.has(i)) {
+        const end = pairs.get(i);
+        const ansi = tokens.slice(i + 1, end).some((t) => DIRECTIONS.has(t.value));
+        declarations(mod, root, i + 1, end, "port", !ansi);
+        if (!ansi) mod.portAliases = root.symbols.filter((symbol) => symbol.kind === "port").map((symbol) => ({ ...symbol }));
+      }
+      for (let n = moduleStart; n <= headerEnd; n++) mod.tokenScopes.set(n, root);
+      const stack = [root];
+      const closes = { end: "block", endgenerate: "generate", endfunction: "function", endtask: "task", endclass: "class", endproperty: "property", endsequence: "sequence", endclocking: "clocking", endspecify: "specify" };
+      for (i = headerEnd + 1; i < moduleEnd; i++) {
+        const token = tokens[i];
+        let current = stack.at(-1);
+        if (closes[token.value]) {
+          let match = stack.length - 1;
+          while (match > 0 && stack[match].kind !== closes[token.value]) match--;
+          if (match > 0) {
+            while (stack.length > match) stack.pop().end = token.end;
+            current = stack.at(-1);
+          }
+          mod.tokenScopes.set(i, current);
+          continue;
+        }
+        if (["function", "task", "class", "property", "sequence", "clocking", "specify"].includes(token.value)) {
+          const end = statementEnd(tokens, pairs, i + 1, moduleEnd);
+          let name;
+          let paren = -1;
+          for (let n = i + 1; n < end; n++) {
+            if (tokens[n].value === "(") {
+              paren = n;
+              break;
+            }
+            if (tokens[n].kind === "identifier" && !TYPE_WORDS.has(tokens[n].value)) name = tokens[n];
+          }
+          const nested = newScope(mod, current, token, token.value, name?.value);
+          if (name && ["function", "task"].includes(token.value)) addSymbol(mod, current, name, token.value);
+          if (paren >= 0 && pairs.has(paren)) declarations(mod, nested, paren + 1, pairs.get(paren), "port");
+          stack.push(nested);
+          for (let n = i; n <= end; n++) {
+            mod.tokenScopes.set(n, nested);
+            mod.excluded.add(n);
+          }
+          i = end;
+          continue;
+        }
+        if (token.value === "begin" || token.value === "generate") {
+          const label = tokens[i + 1]?.value === ":" ? tokens[i + 2]?.value : void 0;
+          current = newScope(mod, current, token, token.value === "begin" ? "block" : "generate", label);
+          stack.push(current);
+          if (label) {
+            mod.excluded.add(i + 1);
+            mod.excluded.add(i + 2);
+          }
+        }
+        mod.tokenScopes.set(i, current);
+      }
+      const unsupported = (scope) => {
+        for (let current = scope; current; current = current.parent) {
+          if (["class", "property", "sequence", "clocking", "specify"].includes(current.kind)) return true;
+        }
+        return false;
+      };
+      for (i = headerEnd + 1; i < moduleEnd; i++) {
+        if (mod.excluded.has(i)) continue;
+        const scope = mod.tokenScopes.get(i) || root;
+        if (unsupported(scope)) continue;
+        if (tokens[i].value === "typedef") {
+          i = statementEnd(tokens, pairs, i + 1, moduleEnd);
+          continue;
+        }
+        if (DECLARATIONS.has(tokens[i].value)) {
+          const end = statementEnd(tokens, pairs, i + 1, moduleEnd);
+          declarations(mod, scope, i, end, "signal");
+          i = end;
+          continue;
+        }
+        if (tokens[i].kind !== "identifier" || KEYWORDS.has(tokens[i].value) || [".", "::"].includes(tokens[i - 1]?.value)) continue;
+        if (["function", "task"].some((kind) => {
+          for (let s = scope; s; s = s.parent) if (s.kind === kind) return true;
+          return false;
+        })) continue;
+        const parsed = parseInstances(mod, scope, i, moduleEnd);
+        if (parsed) i = parsed - 1;
+      }
+      if (tokens.slice(moduleStart, moduleEnd).some((t) => t.conditional)) mod.warnings.push("Preprocessor branches are indexed as possible source; conditions are not evaluated.");
+      if (tokens.slice(moduleStart, moduleEnd).some((t) => t.kind === "macro")) mod.warnings.push("Macro expansion is unavailable in the structural index.");
+      if (mod.scopes.some((s) => s.generated)) mod.warnings.push("Generate blocks are source hierarchy; loop iterations and branch conditions are not elaborated.");
+      return mod;
+    }
+    function namedConnections(mod, start, end, kind) {
+      const { tokens, pairs } = mod.file;
+      const result = [];
+      for (const [from, to] of split(tokens, pairs, start, end)) {
+        if (tokens[from]?.value !== "." || tokens[from + 1]?.kind !== "identifier") continue;
+        const name = tokens[from + 1];
+        const complete = tokens[from + 2]?.value === "(" && pairs.get(from + 2) === to - 1;
+        result.push({
+          ...location(mod.path, name, kind),
+          conditional: !!name.conditional,
+          conditionalContext: name.conditionalContext,
+          expressionStart: tokens[from + 2]?.end ?? name.end,
+          expressionEnd: tokens[to - 1]?.start ?? name.end,
+          implicit: tokens[from + 2]?.value !== "(",
+          ...complete ? { connectionStart: tokens[from].start, connectionEnd: tokens[to - 1].end } : {}
+        });
+      }
+      return result;
+    }
+    function connectionExpression(text, port) {
+      if (typeof text !== "string" || !port || port.conditional) return void 0;
+      if (port.implicit) {
+        if (!Number.isInteger(port.start) || !Number.isInteger(port.end) || port.start < 0 || port.end <= port.start || port.end > text.length) return void 0;
+        let cursor = port.end;
+        while (cursor < text.length) {
+          if (/\s/.test(text[cursor])) {
+            cursor++;
+            continue;
+          }
+          if (text.startsWith("//", cursor)) {
+            const end2 = text.indexOf("\n", cursor + 2);
+            if (end2 < 0) return void 0;
+            cursor = end2 + 1;
+            continue;
+          }
+          if (text.startsWith("/*", cursor)) {
+            const end2 = text.indexOf("*/", cursor + 2);
+            if (end2 < 0) return void 0;
+            cursor = end2 + 2;
+            continue;
+          }
+          return [",", ")"].includes(text[cursor]) ? { ...port } : void 0;
+        }
+        return void 0;
+      }
+      const start = port.expressionStart, end = port.expressionEnd;
+      if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end < start || end > text.length) return void 0;
+      if (text[start - 1] !== "(" || text[end] !== ")") return void 0;
+      const { tokens, hasDirectives } = tokenize(text.slice(start, end));
+      if (!tokens.length || hasDirectives || tokens.some((token) => token.kind === "macro" || token.conditional)) return void 0;
+      return { ...port, start: start + tokens[0].start, end: start + tokens.at(-1).end };
+    }
+    function parseInstances(mod, scope, start, limit) {
+      const { tokens, pairs } = mod.file;
+      const type = tokens[start];
+      let i = start + 1;
+      let parameters = [];
+      if (tokens[i]?.value === "#") {
+        if (tokens[i + 1]?.value !== "(" || !pairs.has(i + 1)) return void 0;
+        const end = pairs.get(i + 1);
+        parameters = namedConnections(mod, i + 2, end, "parameter");
+        i = end + 1;
+      }
+      const instances = [];
+      do {
+        const name = tokens[i];
+        if (!name || name.kind !== "identifier" || KEYWORDS.has(name.value)) return void 0;
+        i++;
+        while (tokens[i]?.value === "[" && pairs.has(i)) i = pairs.get(i) + 1;
+        if (tokens[i]?.value !== "(" || !pairs.has(i)) return void 0;
+        const end = pairs.get(i);
+        if (end >= limit) return void 0;
+        instances.push({
+          ...location(mod.path, name, "instance"),
+          type: type.value,
+          typeStart: type.start,
+          typeEnd: type.end,
+          conditionalContext: type.conditionalContext,
+          parameterized: tokens[start + 1]?.value === "#",
+          scopeId: scope.id,
+          conditional: !!type.conditional || scope.generated,
+          ports: namedConnections(mod, i + 1, end, "port"),
+          parameters,
+          bodyStart: type.start,
+          bodyEnd: tokens[end].end
+        });
+        i = end + 1;
+        if (tokens[i]?.value !== ",") break;
+        i++;
+      } while (i < limit);
+      if (tokens[i]?.value !== ";") return void 0;
+      mod.instances.push(...instances);
+      scope.instances.push(...instances);
+      return i + 1;
+    }
+    function parseFile(path3, text) {
+      const { tokens, hasDirectives } = tokenize(text);
+      const file = { path: path3, text, tokens, hasDirectives, pairs: matchingPairs(tokens), modules: [] };
+      for (let i = 0; i < tokens.length; i++) {
+        if (tokens[i].value !== "module" || tokens[i].escaped) continue;
+        let name = i + 1;
+        if (["automatic", "static"].includes(tokens[name]?.value)) name++;
+        if (tokens[name]?.kind !== "identifier") continue;
+        const headerEnd = statementEnd(tokens, file.pairs, name + 1, tokens.length);
+        let end = headerEnd + 1;
+        while (end < tokens.length && (tokens[end].value !== "endmodule" || tokens[end].escaped)) end++;
+        file.modules.push(parseModule(file, i, name, headerEnd, end));
+        i = end;
+      }
+      return file;
+    }
+    function symbolsIn(scope, name) {
+      for (let current = scope; current; current = current.parent) {
+        const matches = current.symbols.filter((s) => s.name === name);
+        if (matches.length) return matches;
+      }
+      return [];
+    }
+    function instanceIn(scope, name) {
+      for (let current = scope; current; current = current.parent) {
+        const matches = current.instances.filter((s) => s.name === name);
+        if (matches.length) return matches;
+      }
+      return [];
+    }
+    function tokenAt(tokens, offset) {
+      let low = 0;
+      let high = tokens.length - 1;
+      while (low <= high) {
+        const mid = low + high >> 1;
+        const token = tokens[mid];
+        if (offset < token.start) high = mid - 1;
+        else if (offset >= token.end) low = mid + 1;
+        else return mid;
+      }
+      if (high >= 0 && tokens[high].end === offset && tokens[high].kind === "identifier") return high;
+      return -1;
+    }
+    function sourceItemEnd(tokens, pairs, start, limit) {
+      const word = tokens[start]?.value;
+      if (word === "if" || word === "for") {
+        if (tokens[start + 1]?.value !== "(" || !pairs.has(start + 1)) return limit;
+        let end = sourceItemEnd(tokens, pairs, pairs.get(start + 1) + 1, limit);
+        if (word === "if" && tokens[end]?.value === "else") end = sourceItemEnd(tokens, pairs, end + 1, limit);
+        return end;
+      }
+      if (word === "begin" || ["case", "casex", "casez"].includes(word)) {
+        const opening = word === "begin" ? /* @__PURE__ */ new Set(["begin"]) : /* @__PURE__ */ new Set(["case", "casex", "casez"]);
+        const closing = word === "begin" ? "end" : "endcase";
+        let depth = 1;
+        for (let i = start + 1; i < limit; i++) {
+          if (opening.has(tokens[i].value)) depth++;
+          if (tokens[i].value === closing) depth--;
+          if (depth === 0) {
+            return tokens[i + 1]?.value === ":" ? Math.min(i + 3, limit) : i + 1;
+          }
+        }
+        return limit;
+      }
+      return Math.min(statementEnd(tokens, pairs, start, limit) + 1, limit);
+    }
+    function conditionalSourceRanges(mod) {
+      const { tokens, pairs } = mod.file;
+      const ranges = [];
+      for (let i = 0; i < tokens.length; i++) {
+        if (tokens[i].start < mod.bodyStart || tokens[i].end > mod.bodyEnd) continue;
+        if (!["if", "for", "case", "casex", "casez"].includes(tokens[i].value)) continue;
+        const end = sourceItemEnd(tokens, pairs, i, tokens.length);
+        ranges.push([tokens[i].start, tokens[Math.max(i, end - 1)]?.end ?? mod.bodyEnd]);
+      }
+      return ranges;
+    }
+    function localConditionalRanges(mod) {
+      const { tokens, pairs } = mod.file;
+      const procedural = [];
+      for (let i = 0; i < tokens.length; i++) {
+        if (tokens[i].start < mod.bodyStart || tokens[i].end > mod.bodyEnd) continue;
+        if (!["always", "always_comb", "always_ff", "always_latch", "initial", "final"].includes(tokens[i].value)) continue;
+        let start = i + 1;
+        while (["@", "#"].includes(tokens[start]?.value)) {
+          start++;
+          if (tokens[start]?.value === "(" && pairs.has(start)) start = pairs.get(start) + 1;
+          else start++;
+        }
+        while (tokens[start]?.value === "forever" || ["repeat", "while", "foreach"].includes(tokens[start]?.value)) {
+          if (tokens[start].value === "forever") start++;
+          else if (tokens[start + 1]?.value === "(" && pairs.has(start + 1)) start = pairs.get(start + 1) + 1;
+          else break;
+        }
+        const end = sourceItemEnd(tokens, pairs, start, tokens.length);
+        procedural.push([tokens[i].start, tokens[Math.max(i, end - 1)]?.end ?? mod.bodyEnd]);
+      }
+      return conditionalSourceRanges(mod).filter(([start]) => {
+        for (let scope = mod.tokenScopes.get(tokenAt(tokens, start)); scope; scope = scope.parent) {
+          if (scope.kind === "function" || scope.kind === "task") return false;
+        }
+        return !procedural.some(([from, to]) => start >= from && start < to);
+      });
+    }
+    var HdlIndex = class {
+      constructor() {
+        this._files = /* @__PURE__ */ new Map();
+        this._modules = [];
+        this._byName = /* @__PURE__ */ new Map();
+      }
+      update(filePath, text) {
+        this._files.set(fileKey(filePath), parseFile(filePath, text));
+        this._rebuild();
+        return this.modules().filter((mod) => mod.path === filePath);
+      }
+      remove(filePath) {
+        this._files.delete(fileKey(filePath));
+        this._rebuild();
+      }
+      clear() {
+        this._files.clear();
+        this._rebuild();
+      }
+      _rebuild() {
+        this._modules = [...this._files.values()].flatMap((file) => file.modules);
+        this._byName = /* @__PURE__ */ new Map();
+        for (const mod of this._modules) {
+          if (!this._byName.has(mod.name)) this._byName.set(mod.name, []);
+          this._byName.get(mod.name).push(mod);
+        }
+      }
+      modules() {
+        return this._modules.map(({ file, scopes, tokenScopes, excluded, portAliases, ...mod }) => ({ ...mod }));
+      }
+      _moduleLocations(name) {
+        return (this._byName.get(name) || []).map((mod) => location(mod.path, { start: mod.start, end: mod.end, value: mod.name }, "module"));
+      }
+      _connectionDefinitions(instance, connection) {
+        return (this._byName.get(instance.type) || []).flatMap((mod) => mod.scopes[0].symbols.filter((symbol) => symbol.name === connection.name && symbol.kind === connection.kind));
+      }
+      // A presentation span for an already-confirmed target, never a source of
+      // semantic references. Keep the original word ranges intact for navigation.
+      instancePreview(filePath, start, end) {
+        const file = this._files.get(fileKey(filePath));
+        if (!file) return void 0;
+        const matches = file.modules.flatMap((mod) => mod.instances).filter((instance2) => instance2.start === start && instance2.end === end);
+        if (matches.length !== 1) return void 0;
+        const instance = matches[0];
+        if (!/[\r\n]/.test(file.text.slice(instance.typeStart, instance.start))) return void 0;
+        return { path: file.path, start: instance.typeStart, end: instance.end };
+      }
+      candidateSummaries(filePath, start, end) {
+        const file = this._files.get(fileKey(filePath));
+        if (!file || !Number.isInteger(start) || !Number.isInteger(end) || end <= start) return [];
+        const compact = (from, to) => {
+          const tokens = file.tokens.filter((token) => token.start >= from && token.end <= to);
+          let result2 = "", previous;
+          for (const token of tokens) {
+            if (previous && token.start > previous.end && (previous.escaped || previous.kind !== "punctuation" && token.kind !== "punctuation" || previous.kind === "punctuation" && token.kind === "punctuation" && !/[()[\]{},.]/.test(previous.value + token.value))) result2 += " ";
+            result2 += file.text.slice(token.start, token.end).replace(/\r?\n/g, " ");
+            previous = token;
+          }
+          return result2;
+        };
+        const result = [];
+        for (const mod of file.modules) for (const instance of mod.instances) {
+          const type = compact(instance.typeStart, instance.typeEnd);
+          const name = compact(instance.start, instance.end);
+          const add = (label, target, kind) => result.push({
+            label,
+            path: file.path,
+            start: target.start,
+            end: target.end,
+            kind,
+            parentModule: mod.name,
+            instance: instance.name
+          });
+          if (start === instance.start && end === instance.end || start === instance.typeStart && (end === instance.typeEnd || end === instance.end)) {
+            add(`${type}${instance.parameterized ? " #()" : ""} ${name} (`, instance, "instance");
+            continue;
+          }
+          for (const connection of [...instance.parameters, ...instance.ports]) {
+            const exact = start === connection.start && end === connection.end;
+            const expression = start >= connection.expressionStart && end <= connection.expressionEnd;
+            const whole = start === connection.connectionStart && end === connection.connectionEnd;
+            if (!exact && !expression && !whole) continue;
+            const part = connection.implicit ? "." + compact(connection.start, connection.end) : compact(connection.connectionStart, connection.connectionEnd);
+            if (!part) continue;
+            add(connection.kind === "parameter" ? `${type} #(${part}) ${name}` : `${type} ${name} (${part})`, connection, connection.kind);
+          }
+        }
+        if (!result.length) {
+          for (const mod of file.modules) for (const symbol of mod.symbols) {
+            if (symbol.start === start && symbol.end === end && ["port", "parameter", "signal"].includes(symbol.kind)) {
+              result.push({
+                label: `${mod.name} \xB7 ${symbol.direction || symbol.kind} ${compact(start, end)}`,
+                path: file.path,
+                start,
+                end,
+                kind: symbol.kind,
+                parentModule: mod.name
+              });
+            }
+          }
+        }
+        return result;
+      }
+      connectionPreview(filePath, start, end) {
+        const file = this._files.get(fileKey(filePath));
+        if (!file || !Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end <= start || end > file.text.length) return void 0;
+        let result;
+        for (const mod of file.modules) for (const instance of mod.instances) for (const port of instance.ports) {
+          if (port.implicit || !Number.isInteger(port.connectionStart) || !Number.isInteger(port.connectionEnd)) continue;
+          const expression = start >= port.expressionStart && end <= port.expressionEnd;
+          const formal = start === port.start && end === port.end;
+          if (!expression && !formal || /[\r\n]/.test(file.text.slice(port.connectionStart, port.connectionEnd))) continue;
+          if (result) return void 0;
+          result = { path: file.path, start: port.connectionStart, end: port.connectionEnd };
+        }
+        return result;
+      }
+      localSignal(filePath, offset) {
+        const file = this._files.get(fileKey(filePath));
+        if (!file) return void 0;
+        let tokenIndex = tokenAt(file.tokens, offset);
+        if (tokenIndex > 0 && file.tokens[tokenIndex].start === offset && file.tokens[tokenIndex].kind === "punctuation" && file.tokens[tokenIndex - 1].end === offset && file.tokens[tokenIndex - 1].kind === "identifier") tokenIndex--;
+        if (tokenIndex < 0 || file.tokens[tokenIndex].kind !== "identifier") return void 0;
+        const token = file.tokens[tokenIndex];
+        const mod = file.modules.find((item) => token.start >= item.bodyStart && token.end <= item.bodyEnd);
+        if (!mod) return void 0;
+        const explicitPorts = new Set(mod.instances.flatMap((instance) => instance.ports.filter((port) => !port.implicit).map((port) => port.start)));
+        if (explicitPorts.has(token.start)) return void 0;
+        const localTargets = (start) => unique(this.definitions(file.path, start).filter((target) => ["port", "signal"].includes(target.kind) && fileKey(target.path) === fileKey(file.path) && target.start >= mod.bodyStart && target.end <= mod.bodyEnd));
+        const targets = localTargets(token.start);
+        if (targets.length !== 1) return void 0;
+        const declaration = targets[0], declarationKey = key(declaration);
+        const conditions = localConditionalRanges(mod);
+        const uncertain = (candidate, index) => candidate.conditional || mod.tokenScopes.get(index)?.generated || conditions.some(([start, end]) => candidate.start >= start && candidate.end <= end);
+        const hasMacro = file.tokens.some((candidate) => candidate.start >= mod.bodyStart && candidate.end <= mod.bodyEnd && candidate.kind === "macro");
+        const references = [];
+        for (let index = 0; index < file.tokens.length; index++) {
+          const candidate = file.tokens[index];
+          if (candidate.kind !== "identifier" || candidate.value !== declaration.name || candidate.start < mod.bodyStart || candidate.end > mod.bodyEnd || candidate.start === declaration.start || explicitPorts.has(candidate.start) || uncertain(candidate, index)) continue;
+          const resolved = localTargets(candidate.start);
+          if (resolved.length === 1 && key(resolved[0]) === declarationKey) references.push(location(file.path, candidate, "reference"));
+        }
+        return {
+          declaration,
+          module: { name: mod.name, path: mod.path, start: mod.start, end: mod.end, bodyStart: mod.bodyStart, bodyEnd: mod.bodyEnd },
+          references: unique(references),
+          certain: !mod.conditional && !declaration.conditional && !hasMacro && !uncertain(token, tokenIndex)
+        };
+      }
+      parentConnections(filePath, offset, options = {}) {
+        const file = this._files.get(fileKey(filePath));
+        if (!file) return void 0;
+        let tokenIndex = tokenAt(file.tokens, offset);
+        if (tokenIndex > 0 && file.tokens[tokenIndex].start === offset && file.tokens[tokenIndex].kind === "punctuation" && file.tokens[tokenIndex - 1].end === offset && file.tokens[tokenIndex - 1].kind === "identifier") tokenIndex--;
+        if (tokenIndex < 0 || file.tokens[tokenIndex].kind !== "identifier") return void 0;
+        const token = file.tokens[tokenIndex];
+        const mod = file.modules.find((item) => token.start >= item.bodyStart && token.end <= item.bodyEnd);
+        if (!mod) return void 0;
+        let declaration;
+        if (token.start === mod.start) declaration = location(mod.path, token, "module", { conditional: mod.conditional });
+        else {
+          const ports = mod.scopes[0].symbols.filter((symbol) => symbol.kind === "port" && symbol.direction && !symbol.provisional);
+          declaration = ports.find((symbol) => symbol.start === token.start);
+          if (!declaration) {
+            const alias = mod.portAliases.find((symbol) => symbol.start === token.start);
+            const matches = alias ? ports.filter((symbol) => symbol.name === alias.name) : [];
+            if (matches.length === 1) declaration = matches[0];
+          }
+        }
+        if (!declaration) return void 0;
+        const module3 = { name: mod.name, path: mod.path, start: mod.start, end: mod.end, bodyStart: mod.bodyStart, bodyEnd: mod.bodyEnd };
+        const connections = [];
+        if ((this._byName.get(mod.name) || []).length !== 1 || mod.conditional || declaration.conditional) return { declaration, module: module3, connections };
+        for (const parent of this._modules) {
+          if (parent.conditional) continue;
+          const parentTokens = parent.file.tokens.filter((item) => item.start >= parent.bodyStart && item.end <= parent.bodyEnd);
+          if (parentTokens.some((item) => item.kind === "macro")) continue;
+          const conditionalRanges = conditionalSourceRanges(parent);
+          for (const instance of parent.instances) {
+            if (instance.type !== mod.name || instance.conditional) continue;
+            if (conditionalRanges.some(([start, end]) => instance.start >= start && instance.bodyEnd <= end)) continue;
+            const extras = { parentModule: parent.name, instance: instance.name, type: instance.type };
+            if (declaration.kind === "module") {
+              connections.push(location(parent.path, { start: instance.start, end: instance.end, value: instance.name }, "instance", extras));
+            } else {
+              const ports = instance.ports.filter((port) => port.name === declaration.name && !port.conditional);
+              if (options.target === "expression") {
+                const expression = ports.length === 1 ? connectionExpression(parent.file.text, { ...ports[0], ...extras }) : void 0;
+                if (expression) connections.push(expression);
+              } else if (options.target === "port") {
+                if (ports.length === 1) connections.push({ ...ports[0], ...extras });
+              } else connections.push(...ports.map((port) => ({ ...port, ...extras })));
+            }
+          }
+        }
+        return { declaration, module: module3, connections: unique(connections) };
+      }
+      definitions(filePath, offset) {
+        const file = this._files.get(fileKey(filePath));
+        if (!file) return [];
+        const tokenIndex = tokenAt(file.tokens, offset);
+        if (tokenIndex < 0 || file.tokens[tokenIndex].kind !== "identifier") return [];
+        const token = file.tokens[tokenIndex];
+        const mod = file.modules.find((item) => token.start >= item.bodyStart && token.end <= item.bodyEnd);
+        if (!mod) return [];
+        if (token.start === mod.start) return this._moduleLocations(mod.name).filter((loc) => fileKey(loc.path) === fileKey(filePath) && loc.start === token.start);
+        const scope = mod.tokenScopes.get(tokenIndex) || mod.scopes[0];
+        for (const instance of mod.instances) {
+          if (token.start === instance.typeStart || token.start === instance.start) return this._moduleLocations(instance.type);
+          const connection = [...instance.ports, ...instance.parameters].find((p) => p.start === token.start);
+          if (connection) {
+            const targets = this._connectionDefinitions(instance, connection);
+            if (connection.implicit && connection.kind === "port") targets.push(...symbolsIn(scope, connection.name));
+            return unique(targets);
+          }
+        }
+        if (file.tokens[tokenIndex - 1]?.value === "::" || file.tokens[tokenIndex + 1]?.value === "::") return [];
+        const chain = [token.value];
+        let cursor = tokenIndex;
+        while (file.tokens[cursor - 1]?.value === ".") {
+          let previous = cursor - 2;
+          while (file.tokens[previous]?.value === "]" && file.pairs.has(previous)) previous = file.pairs.get(previous) - 1;
+          if (file.tokens[previous]?.kind !== "identifier") return [];
+          chain.unshift(file.tokens[previous].value);
+          cursor = previous;
+        }
+        if (chain.length > 1) return unique(this._hierarchical(mod, scope, chain));
+        const symbols = symbolsIn(scope, token.value);
+        if (symbols.length) return unique(symbols);
+        const instances = instanceIn(scope, token.value);
+        return unique(instances.flatMap((instance) => this._moduleLocations(instance.type)));
+      }
+      _hierarchical(mod, scope, chain) {
+        let contexts = [{ mod, scope }];
+        for (let i = 0; i < chain.length; i++) {
+          const name = chain[i];
+          const final = i === chain.length - 1;
+          const next = [];
+          const locations = [];
+          for (const context of contexts) {
+            if (i === 0 && name === context.mod.name) {
+              next.push({ mod: context.mod, scope: context.mod.scopes[0] });
+              continue;
+            }
+            const instances = i === 0 ? instanceIn(context.scope, name) : context.scope.instances.filter((instance) => instance.name === name);
+            for (const instance of instances) {
+              if (final) locations.push(...this._moduleLocations(instance.type));
+              else for (const child of this._byName.get(instance.type) || []) next.push({ mod: child, scope: child.scopes[0] });
+            }
+            let scopes = context.scope.children.filter((child) => child.name === name);
+            scopes = scopes.concat(context.scope.children.filter((child) => child.kind === "generate").flatMap((child) => child.children.filter((nested) => nested.name === name)));
+            if (i === 0) {
+              for (let parent = context.scope.parent; parent && !scopes.length; parent = parent.parent) scopes = parent.children.filter((child) => child.name === name);
+            }
+            for (const child of scopes) next.push({ mod: context.mod, scope: child });
+            if (final) locations.push(...context.scope.symbols.filter((symbol) => symbol.name === name));
+          }
+          if (final) return locations;
+          contexts = next;
+          if (!contexts.length) return [];
+        }
+        return [];
+      }
+      references(filePath, offset, includeDeclaration = false) {
+        const targets = this.definitions(filePath, offset);
+        if (!targets.length) return [];
+        const targetKeys = new Set(targets.map(key));
+        const results = [];
+        for (const file of this._files.values()) {
+          for (const token of file.tokens) {
+            if (token.kind !== "identifier") continue;
+            const loc = location(file.path, token, "reference");
+            if (!includeDeclaration && targetKeys.has(key(loc))) continue;
+            if (this.definitions(file.path, token.start).some((target) => targetKeys.has(key(target)))) results.push(loc);
+          }
+        }
+        return unique(results);
+      }
+    };
+    module2.exports = { HdlIndex, connectionExpression };
+  }
+});
+
 // src/xpr.js
 var require_xpr = __commonJS({
   "src/xpr.js"(exports2, module2) {
@@ -1772,7 +2602,10 @@ var require_xpr = __commonJS({
     var fs2 = require("node:fs/promises");
     var path2 = require("node:path");
     var { XMLParser, XMLValidator } = require_fxp();
+    var { readSource } = require_encoding();
+    var { HdlIndex } = require_indexer();
     var HDL_EXTENSIONS = /* @__PURE__ */ new Set([".v", ".sv", ".vh", ".svh"]);
+    var LATTICE_IP_EXTENSIONS = /* @__PURE__ */ new Set([".ipx", ".sbx", ".lpc"]);
     var truth = (value) => /^(1|true|yes)$/i.test(String(value));
     var falsehood = (value) => /^(0|false|no)$/i.test(String(value));
     var array = (value) => value === void 0 || value === null ? [] : Array.isArray(value) ? value : [value];
@@ -1876,10 +2709,760 @@ var require_xpr = __commonJS({
         ".vhd": "VHDL",
         ".vhdl": "VHDL",
         ".xdc": "XDC",
+        ".lpf": "LPF",
+        ".sdc": "SDC",
+        ".prf": "PRF",
         ".xci": "IP",
         ".xcix": "IP Core Container",
-        ".bd": "Block Design"
+        ".bd": "Block Design",
+        ".ipx": "IP",
+        ".sbx": "IP",
+        ".lpc": "IP"
       }[path2.extname(file).toLowerCase()] || "File";
+    }
+    function parseLpfKeyValues(tokens) {
+      const attributes = {};
+      for (let i = 0; i < tokens.length; i++) {
+        const text = tokens[i].text;
+        const eq = text.indexOf("=");
+        if (eq > 0) {
+          const name = text.slice(0, eq).trim();
+          const rest = text.slice(eq + 1).trim();
+          if (rest) attributes[name] = rest;
+          else if (tokens[i + 1]) attributes[name] = tokens[++i].text;
+        } else if (tokens[i + 1] && !tokens[i + 1].quoted && tokens[i + 1].text === "=" && tokens[i + 2]) {
+          attributes[text] = tokens[i + 2].text;
+          i += 2;
+        } else if (tokens[i + 1] && !tokens[i + 1].quoted && tokens[i + 1].text.startsWith("=")) {
+          attributes[text] = tokens[i + 1].text.slice(1);
+          i += 1;
+        }
+      }
+      return attributes;
+    }
+    function parseLpf(text) {
+      if (typeof text !== "string" || /\0/.test(text)) throw new Error("LPF \u5305\u542B\u4E0D\u652F\u6301\u7684\u7A7A\u5B57\u7B26\u6216\u4E8C\u8FDB\u5236\u5185\u5BB9\u3002");
+      const source = text.replace(/^\uFEFF/, "");
+      if (/^\s*</.test(source)) throw new Error("LPF \u8BED\u6CD5\u65E0\u6548\uFF1A\u68C0\u6D4B\u5230 XML \u6807\u7B7E\u3002");
+      const rawStatements = [];
+      let current = [];
+      let i = 0;
+      while (i < source.length) {
+        const ch = source[i];
+        if (/\s/.test(ch)) {
+          i++;
+          continue;
+        }
+        if (ch === "#" || source.startsWith("//", i)) {
+          const end = source.indexOf("\n", i + 1);
+          i = end < 0 ? source.length : end + 1;
+          continue;
+        }
+        if (source.startsWith("/*", i)) {
+          const end = source.indexOf("*/", i + 2);
+          if (end < 0) throw new Error("LPF \u4E2D\u5B58\u5728\u672A\u95ED\u5408\u7684\u5757\u6CE8\u91CA\u3002");
+          i = end + 2;
+          continue;
+        }
+        if (ch === ";") {
+          if (current.length) {
+            rawStatements.push(current);
+            current = [];
+          }
+          i++;
+          continue;
+        }
+        if (ch === '"') {
+          let value = "";
+          const start2 = i++;
+          let closed = false;
+          while (i < source.length) {
+            if (source[i] === "\\" && i + 1 < source.length) {
+              value += source[i + 1];
+              i += 2;
+              continue;
+            }
+            if (source[i] === "\r" || source[i] === "\n") break;
+            if (source[i] === '"') {
+              closed = true;
+              i++;
+              break;
+            }
+            value += source[i++];
+          }
+          if (!closed) throw new Error("LPF \u4E2D\u5B58\u5728\u672A\u95ED\u5408\u7684\u5F15\u53F7\u3002");
+          current.push({ text: value, raw: source.slice(start2, i), quoted: true });
+          continue;
+        }
+        const start = i;
+        while (i < source.length && !/[\s;"#]/.test(source[i]) && !source.startsWith("//", i) && !source.startsWith("/*", i)) i++;
+        const raw = source.slice(start, i);
+        current.push({ text: raw, raw, quoted: false });
+      }
+      if (current.length) {
+        throw new Error(`LPF \u8BED\u53E5\u7F3A\u5C11\u5206\u53F7\u7ED3\u5C3E\uFF1A${current.map((token) => token.raw).join(" ")}`);
+      }
+      const statements = [];
+      const ports = [];
+      const locates = [];
+      const iobufs = [];
+      const frequencies = [];
+      const sysconfig = {};
+      const blocks = [];
+      for (const stmt of rawStatements) {
+        const firstToken = stmt[0];
+        const keyword = firstToken.text.toUpperCase();
+        if (firstToken.quoted || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(keyword)) {
+          throw new Error(`LPF \u8BED\u53E5\u5173\u952E\u5B57\u65E0\u6548\uFF1A${firstToken.raw}`);
+        }
+        const raw = stmt.map((token) => token.raw).join(" ");
+        statements.push({ keyword, tokens: stmt.map((token) => token.text), raw });
+        if (keyword === "LOCATE") {
+          const targetType = (stmt[1]?.text || "").toUpperCase();
+          const name = stmt[2]?.text || "";
+          const siteIndex = stmt.findIndex((token, index) => index >= 3 && !token.quoted && token.text.toUpperCase() === "SITE");
+          const site = siteIndex >= 0 ? stmt[siteIndex + 1]?.text || "" : "";
+          locates.push({ targetType, name, site, raw });
+          if (targetType === "COMP" && name) ports.push(name);
+        } else if (keyword === "IOBUF") {
+          const targetType = (stmt[1]?.text || "").toUpperCase();
+          const hasName = targetType === "PORT" || targetType === "GROUP";
+          const name = hasName ? stmt[2]?.text || "" : "";
+          const attributes = parseLpfKeyValues(stmt.slice(hasName ? 3 : 2));
+          iobufs.push({ targetType, name, attributes, raw });
+          if (targetType === "PORT" && name) ports.push(name);
+        } else if (keyword === "FREQUENCY") {
+          const targetType = (stmt[1]?.text || "").toUpperCase();
+          const name = stmt[2]?.text || "";
+          const value = stmt[3]?.text || "";
+          const unit = stmt[4]?.text || "";
+          frequencies.push({ targetType, name, value, unit, raw });
+          if (targetType === "PORT" && name) ports.push(name);
+        } else if (keyword === "SYSCONFIG") {
+          Object.assign(sysconfig, parseLpfKeyValues(stmt.slice(1)));
+        } else if (keyword === "BLOCK") {
+          blocks.push(stmt.slice(1).map((token) => token.raw).join(" "));
+        }
+      }
+      return { statements, ports: [...new Set(ports)], locates, iobufs, frequencies, sysconfig, blocks };
+    }
+    function latticeOptions(node) {
+      const result = /* @__PURE__ */ new Map();
+      const add = (rawName, rawValue) => {
+        const name = String(rawName || "").toLowerCase();
+        if (!name) return;
+        result.set(name, [...result.get(name) || [], String(rawValue ?? "")]);
+      };
+      for (const item of array(node)) {
+        if (!item || typeof item !== "object") continue;
+        for (const [k, v] of Object.entries(item)) {
+          if (k === "Option" || k === "Property") continue;
+          if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") add(k, v);
+        }
+        for (const child of [...array(item.Option), ...array(item.Property)]) {
+          if (child && typeof child === "object") add(child.name ?? child.Name, child.value ?? child.Val ?? "");
+        }
+      }
+      return result;
+    }
+    function latticeFileType(rawPath, typeShort, typeLong) {
+      const inferred = inferredType(rawPath);
+      if (inferred !== "File") return inferred;
+      const short = String(typeShort || "").toUpperCase();
+      const long = String(typeLong || "");
+      if (short === "LPF" || /logic preference/i.test(long)) return "LPF";
+      if (short === "SDC" || /constraints/i.test(long)) return "SDC";
+      if (["IPX", "SBX", "LPC"].includes(short)) return "IP";
+      if (/verilog/i.test(short) || /verilog/i.test(long)) return "Verilog";
+      if (/vhdl/i.test(short) || /vhdl/i.test(long)) return "VHDL";
+      return long || short || "File";
+    }
+    async function candidateLatticeIpFiles(ipPath) {
+      const dir = path2.dirname(ipPath);
+      const stem = path2.basename(ipPath, path2.extname(ipPath));
+      const stubs = [];
+      if (path2.extname(ipPath).toLowerCase() === ".ipx" && await isFile(ipPath)) {
+        try {
+          const xml = await readSource(ipPath, "auto");
+          if (!/<!DOCTYPE\b|<!ENTITY\b/i.test(xml) && XMLValidator.validate(xml) === true) {
+            const parser = new XMLParser({
+              ignoreAttributes: false,
+              attributeNamePrefix: "",
+              removeNSPrefix: true,
+              parseAttributeValue: false,
+              parseTagValue: false,
+              trimValues: false,
+              processEntities: true
+            });
+            const mod = parser.parse(xml).DiamondModule;
+            for (const pkg of array(mod && mod.Package)) {
+              for (const f of array(pkg && pkg.File)) {
+                const type = String(f.type || "").toLowerCase();
+                const name = String(f.name || "");
+                if (name && (type === "top_level_verilog" || type === "top_level_systemverilog")) {
+                  stubs.push(resolveXprPath(name, ipPath));
+                }
+              }
+            }
+          }
+        } catch (_) {
+        }
+      }
+      stubs.push(path2.join(dir, `${stem}.v`), path2.join(dir, `${stem}_stub.v`));
+      const netlist = path2.join(dir, `${stem}_sim_netlist.v`);
+      return { stubs: unique(stubs), netlist };
+    }
+    async function inferTopFromSources(sourceFiles, lpf, preferredName) {
+      if (!sourceFiles.length) return "";
+      const index = new HdlIndex();
+      const portMap = /* @__PURE__ */ new Map();
+      for (const file of sourceFiles) {
+        try {
+          const text = await readSource(file, "auto");
+          index.update(file, text);
+        } catch (_) {
+        }
+      }
+      const mods = index.modules();
+      if (!mods.length) return "";
+      for (const file of index._files.values()) {
+        for (const mod of file.modules) {
+          const ports = new Set((mod.scopes[0]?.symbols || []).filter((s) => s.kind === "port").map((s) => s.name));
+          portMap.set(mod.name, ports);
+        }
+      }
+      const called = new Set(mods.flatMap((m) => m.instances.map((i) => i.type)));
+      const roots = mods.filter((m) => !called.has(m.name));
+      const candidates = roots.length ? roots : mods;
+      if (lpf?.ports?.length) {
+        let best = null;
+        let bestScore = 0;
+        for (const mod of candidates) {
+          const declared = portMap.get(mod.name) || /* @__PURE__ */ new Set();
+          const score = lpf.ports.filter((p) => declared.has(p)).length;
+          if (score > bestScore) {
+            bestScore = score;
+            best = mod;
+          }
+        }
+        if (best && bestScore > 0) return best.name;
+      }
+      if (preferredName) {
+        const exact = candidates.find((m) => m.name.toLowerCase() === preferredName.toLowerCase()) || mods.find((m) => m.name.toLowerCase() === preferredName.toLowerCase());
+        if (exact) return exact.name;
+      }
+      return candidates[0].name;
+    }
+    async function findCompanionLdf(lpfPath) {
+      const dir = path2.dirname(lpfPath);
+      const stem = path2.basename(lpfPath, path2.extname(lpfPath));
+      const sameStem = path2.join(dir, `${stem}.ldf`);
+      if (await isFile(sameStem)) return sameStem;
+      const searchDirs = [dir];
+      const parentDir = path2.dirname(dir);
+      if (parentDir && parentDir !== dir) searchDirs.push(parentDir);
+      for (const candidateDir of searchDirs) {
+        let entries = [];
+        try {
+          entries = await fs2.readdir(candidateDir, { withFileTypes: true });
+        } catch {
+          continue;
+        }
+        const ldfs = entries.filter((e) => e.isFile() && path2.extname(e.name).toLowerCase() === ".ldf").map((e) => path2.join(candidateDir, e.name)).sort((a, b) => a.localeCompare(b, "en"));
+        if (!ldfs.length) continue;
+        for (const ldf of ldfs) {
+          try {
+            const xml = await readSource(ldf, "auto");
+            if (/<!DOCTYPE\b|<!ENTITY\b/i.test(xml) || XMLValidator.validate(xml) !== true) continue;
+            const parser = new XMLParser({
+              ignoreAttributes: false,
+              attributeNamePrefix: "",
+              removeNSPrefix: true,
+              parseAttributeValue: false,
+              parseTagValue: false,
+              trimValues: false,
+              processEntities: true
+            });
+            const bali = parser.parse(xml).BaliProject;
+            if (!bali) continue;
+            for (const impl of array(bali.Implementation)) {
+              for (const src of array(impl && impl.Source)) {
+                try {
+                  if (key(resolveXprPath(String(src.name || src.Path || ""), ldf)) === key(lpfPath)) return ldf;
+                } catch (_) {
+                }
+              }
+              if (candidateDir === parentDir && impl?.dir) {
+                try {
+                  if (key(resolveXprPath(String(impl.dir), ldf)) === key(dir)) return ldf;
+                } catch (_) {
+                }
+              }
+            }
+          } catch (_) {
+          }
+        }
+        if (candidateDir === dir && ldfs.length === 1) return ldfs[0];
+      }
+      return null;
+    }
+    async function loadBaliProject(ldfPath, xml, root, options = {}) {
+      const projectPath = options.selectedProjectPath ? path2.resolve(options.selectedProjectPath) : ldfPath;
+      const projectRoot = path2.dirname(ldfPath);
+      const implNodes = array(root.Implementation);
+      if (!implNodes.length) throw new Error("Lattice \u5DE5\u7A0B\u4E2D\u6CA1\u6709 Implementation\u3002");
+      const warnings = [];
+      const globalProps = latticeOptions(root.Options);
+      const sets = implNodes.map((node) => {
+        const props = latticeOptions(node.Options);
+        let sourceTop = "";
+        for (const src of array(node.Source)) {
+          const srcOpts = latticeOptions(src.Options);
+          const enabled = ![src.excluded, ...srcOpts.get("excluded") || [], ...srcOpts.get("isdisabled") || [], ...srcOpts.get("autodisabled") || []].filter(Boolean).some(truth) && ![src.enabled, ...srcOpts.get("enabled") || [], ...srcOpts.get("isenabled") || []].filter(Boolean).some(falsehood);
+          if (enabled && !sourceTop) {
+            sourceTop = first(srcOpts, "top_module") || first(srcOpts, "top") || String(src.top_module || "");
+          }
+        }
+        const top2 = first(props, "top") || first(props, "topmodule") || first(props, "top_module") || sourceTop || first(props, "def_top");
+        return {
+          name: String(node.title || node.name || ""),
+          type: "DesignSrcs",
+          dir: String(node.dir || node.title || node.name || ""),
+          defaultStrategy: String(node.default_strategy || ""),
+          top: top2,
+          node,
+          props
+        };
+      });
+      if (new Set(sets.map((set) => set.name)).size !== sets.length || sets.some((set) => !set.name)) {
+        throw new Error("Lattice Implementation \u540D\u79F0\u4E3A\u7A7A\u6216\u91CD\u590D\u3002");
+      }
+      const byName = new Map(sets.map((set) => [set.name, set]));
+      let defaultImplName = String(root.default_implementation || first(globalProps, "default_implementation") || "");
+      if (!options.fileset && options.primaryLpfPath) {
+        const lpfDir = path2.dirname(options.primaryLpfPath);
+        const matchingDirImpl = sets.find((set) => {
+          try {
+            return key(resolveXprPath(set.dir, ldfPath)) === key(lpfDir);
+          } catch {
+            return false;
+          }
+        });
+        if (matchingDirImpl) defaultImplName = matchingDirImpl.name;
+      }
+      const main2 = options.fileset ? byName.get(options.fileset) : byName.get(defaultImplName) || sets[0];
+      if (!main2) throw new Error(options.fileset ? `\u627E\u4E0D\u5230 fileset\uFF1A${options.fileset}` : "Lattice \u5DE5\u7A0B\u4E2D\u6CA1\u6709\u53EF\u9009\u7684\u8BBE\u8BA1 Implementation\u3002");
+      const selected = /* @__PURE__ */ new Set([main2.name]);
+      const includeSimulation = Boolean(options.includeSimulation);
+      const defaultLibrary = first(globalProps, "defaultlib", "work") || "work";
+      const files = [];
+      for (const set of sets) {
+        for (const node of array(set.node.Source)) {
+          const srcOpts = latticeOptions(node.Options);
+          const rawPath = String(node.name || node.Path || "");
+          let resolved = null;
+          try {
+            resolved = resolveXprPath(rawPath, ldfPath);
+          } catch (error) {
+            warnings.push(`${set.name}\uFF1A${error.message}`);
+          }
+          const enabled = ![node.excluded, ...srcOpts.get("excluded") || [], ...srcOpts.get("isdisabled") || [], ...srcOpts.get("autodisabled") || []].filter(Boolean).some(truth) && ![node.enabled, ...srcOpts.get("enabled") || [], ...srcOpts.get("isenabled") || []].filter(Boolean).some(falsehood);
+          const synSim = String(node.syn_sim || first(srcOpts, "syn_sim") || "").toLowerCase();
+          const usedIn = /simonly|simulationonly|^sim$/i.test(synSim) ? ["simulation"] : /synthesisonly|^syn$/i.test(synSim) ? ["synthesis"] : ["synthesis", "simulation"];
+          const sourcePurpose = includeSimulation || usedIn.includes("synthesis");
+          const library = String(node.work_lib || first(srcOpts, "work_lib") || first(srcOpts, "library") || defaultLibrary);
+          files.push({
+            path: resolved,
+            rawPath,
+            fileset: set.name,
+            type: latticeFileType(rawPath, node.type_short, node.type),
+            exists: false,
+            existence: "unknown",
+            enabled,
+            usedIn,
+            library,
+            generated: false,
+            selected: selected.has(set.name) && sourcePurpose
+          });
+        }
+      }
+      if (options.primaryLpfPath) {
+        const primaryKey = key(options.primaryLpfPath);
+        if (!files.some((file) => file.path && key(file.path) === primaryKey && file.fileset === main2.name)) {
+          const relRaw = path2.relative(projectRoot, options.primaryLpfPath).replace(/\\/g, "/");
+          files.push({
+            path: options.primaryLpfPath,
+            rawPath: relRaw || path2.basename(options.primaryLpfPath),
+            fileset: main2.name,
+            type: "LPF",
+            exists: true,
+            existence: "exists",
+            enabled: true,
+            usedIn: ["synthesis", "simulation"],
+            library: defaultLibrary,
+            generated: false,
+            selected: true
+          });
+        }
+      }
+      await Promise.all(files.map(async (file) => {
+        if (file.path) {
+          try {
+            file.exists = await isFile(file.path);
+            file.existence = file.exists ? "exists" : "missing";
+          } catch (error) {
+            warnings.push(`\u65E0\u6CD5\u68C0\u67E5\u6587\u4EF6 ${file.path}\uFF1A${error.message}`);
+          }
+        }
+        if (file.path && !file.exists && file.enabled && file.selected) warnings.push(`\u5DE5\u7A0B\u6587\u4EF6\u4E0D\u5B58\u5728\uFF1A${file.path}`);
+      }));
+      const isLatticeIp = (file) => LATTICE_IP_EXTENSIONS.has(path2.extname(file.path || file.rawPath).toLowerCase());
+      if (options.includeIpStubs !== false) {
+        const seenIp = /* @__PURE__ */ new Set();
+        const known = new Set(files.filter((file) => file.path && file.enabled && file.selected).map((file) => key(file.path)));
+        for (const file of [...files]) {
+          if (!file.selected || !file.enabled || !file.exists || !isLatticeIp(file)) continue;
+          if (seenIp.has(key(file.path))) continue;
+          seenIp.add(key(file.path));
+          const { stubs } = await candidateLatticeIpFiles(file.path);
+          for (const candidate of stubs) {
+            let exists = false;
+            try {
+              exists = await isFile(candidate);
+            } catch (error) {
+              warnings.push(`\u65E0\u6CD5\u68C0\u67E5 IP \u58F0\u660E\uFF1A${error.message}`);
+            }
+            if (!exists) continue;
+            if (!known.has(key(candidate))) {
+              files.push({ ...file, path: candidate, rawPath: candidate, type: "Verilog IP Stub", exists: true, existence: "exists", generated: true, origin: file.path });
+              known.add(key(candidate));
+            }
+            break;
+          }
+        }
+      }
+      const ipReferences = [];
+      const seenReferences = /* @__PURE__ */ new Map();
+      for (const file of files) {
+        if (!file.selected || !file.enabled || !isLatticeIp(file)) continue;
+        const identity = file.path ? key(file.path) : `raw:${file.rawPath}`;
+        const previous = seenReferences.get(identity);
+        if (previous) {
+          previous.rawPaths = [.../* @__PURE__ */ new Set([...previous.rawPaths, file.rawPath])];
+          previous.filesets = [.../* @__PURE__ */ new Set([...previous.filesets, file.fileset])];
+          continue;
+        }
+        const reference = {
+          path: file.path,
+          rawPaths: [file.rawPath],
+          filesets: [file.fileset],
+          existence: file.existence,
+          netlistPath: null,
+          netlistExistence: "unknown",
+          artifactPaths: []
+        };
+        if (file.path) {
+          const { stubs, netlist } = await candidateLatticeIpFiles(file.path);
+          reference.netlistPath = netlist;
+          reference.artifactPaths = unique([...stubs, netlist]);
+          try {
+            reference.netlistExistence = await isFile(reference.netlistPath) ? "exists" : "missing";
+          } catch (error) {
+            warnings.push(`\u65E0\u6CD5\u68C0\u67E5 IP \u4EFF\u771F\u7F51\u8868\u5019\u9009\u8DEF\u5F84 ${reference.netlistPath}\uFF1A${error.message}`);
+          }
+        }
+        seenReferences.set(identity, reference);
+        ipReferences.push(reference);
+      }
+      const sourceFiles = unique(files.filter((file) => file.enabled && file.selected && file.exists && HDL_EXTENSIONS.has(path2.extname(file.path).toLowerCase())).map((file) => file.path));
+      const includeDirs = [];
+      const defines = [];
+      const addValues = (values, target, resolve) => {
+        for (const value of values) {
+          if (!value || !String(value).trim()) continue;
+          try {
+            target.push(resolve ? resolveXprPath(String(value).trim(), ldfPath) : String(value).trim());
+          } catch (error) {
+            warnings.push(error.message);
+          }
+        }
+      };
+      const strategies = array(root.Strategy);
+      for (const set of sets.filter((set2) => selected.has(set2.name))) {
+        for (const [propertyName, target, resolve] of [
+          ["include path", includeDirs, true],
+          ["include_path", includeDirs, true],
+          ["includedirs", includeDirs, true],
+          ["search_path", includeDirs, true],
+          ["hdl_param", defines, false],
+          ["ver_directive", defines, false],
+          ["verilogdefines", defines, false],
+          ["verilogdefine", defines, false],
+          ["defines", defines, false]
+        ]) {
+          for (const value of set.props.get(propertyName) || []) {
+            try {
+              addValues(listWords(value), target, resolve);
+            } catch (error) {
+              warnings.push(`${set.name} ${propertyName}\uFF1A${error.message}`);
+            }
+          }
+        }
+        const strategyNode = strategies.find((item) => String(item.name || "") === set.defaultStrategy) || strategies[0];
+        if (strategyNode?.file) {
+          try {
+            const styPath = resolveXprPath(String(strategyNode.file), ldfPath);
+            if (await isFile(styPath)) {
+              const styRaw = await readSource(styPath, "auto");
+              if (!/<!ENTITY\b/i.test(styRaw)) {
+                const styXml = styRaw.replace(/<!DOCTYPE[^>]*>/gi, "");
+                if (XMLValidator.validate(styXml) === true) {
+                  const parser = new XMLParser({
+                    ignoreAttributes: false,
+                    attributeNamePrefix: "",
+                    removeNSPrefix: true,
+                    parseAttributeValue: false,
+                    parseTagValue: false,
+                    trimValues: false,
+                    processEntities: true
+                  });
+                  const styProps = latticeOptions(parser.parse(styXml).Strategy);
+                  for (const propName of ["prop_lst_edfinlibpath", "prop_syn_edfinlibpath", "prop_syn_libpath", "prop_bd_edfinlibpath"]) {
+                    for (const val of styProps.get(propName) || []) {
+                      if (val.trim()) try {
+                        addValues(listWords(val), includeDirs, true);
+                      } catch (error) {
+                        warnings.push(`${propName}\uFF1A${error.message}`);
+                      }
+                    }
+                  }
+                  for (const propName of ["prop_lst_hashdefine", "prop_syn_hashdefine", "prop_pre_hashdefine"]) {
+                    for (const val of styProps.get(propName) || []) {
+                      if (val.trim()) try {
+                        addValues(listWords(val), defines, false);
+                      } catch (error) {
+                        warnings.push(`${propName}\uFF1A${error.message}`);
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          } catch (error) {
+            warnings.push(`\u8BFB\u53D6\u7B56\u7565\u6587\u4EF6\u5931\u8D25\uFF1A${error.message}`);
+          }
+        }
+      }
+      addValues(array(options.includeDirs), includeDirs, true);
+      addValues(array(options.defines), defines, false);
+      for (const file of sourceFiles.filter((file2) => /\.(vh|svh)$/i.test(file2))) includeDirs.push(path2.dirname(file));
+      let activeLpf = options.primaryLpf || null;
+      let activeLpfPath = options.primaryLpfPath || null;
+      for (const file of files) {
+        if (!file.selected || !file.enabled || !file.exists || !file.path || path2.extname(file.path).toLowerCase() !== ".lpf") continue;
+        if (options.primaryLpfPath && key(file.path) === key(options.primaryLpfPath) && options.primaryLpf) {
+          file.lpf = options.primaryLpf;
+          continue;
+        }
+        try {
+          const lpfText = await readSource(file.path, "auto");
+          const parsed = parseLpf(lpfText);
+          file.lpf = parsed;
+          if (!activeLpf) {
+            activeLpf = parsed;
+            activeLpfPath = file.path;
+          }
+        } catch (error) {
+          warnings.push(`LPF ${path2.basename(file.path)}\uFF1A${error.message}`);
+        }
+      }
+      if (files.some((file) => file.selected && file.enabled && isLatticeIp(file))) {
+        warnings.push("Lattice IP \u4EC5\u7D22\u5F15\u5DE5\u7A0B\u5DF2\u5217\u51FA\u7684\u6E90\u7801\u53CA\u7CBE\u786E\u5339\u914D\u7684\u73B0\u6709 IP \u6A21\u5757\uFF1B\u672A\u542F\u52A8 Diamond \u5C55\u5F00\u6216\u751F\u6210\u8F93\u51FA\u3002");
+      }
+      const projectName = String(root.title || path2.basename(projectPath, path2.extname(projectPath)));
+      const top = main2.top || await inferTopFromSources(sourceFiles, activeLpf, projectName);
+      const version = String(root.version || "");
+      return {
+        path: projectPath,
+        root: projectRoot,
+        name: projectName,
+        part: String(root.device || ""),
+        vivadoVersion: version,
+        diamondVersion: version,
+        projectType: "lattice",
+        ldfPath,
+        lpfPath: activeLpfPath,
+        lpf: activeLpf,
+        top,
+        filesets: sets.map(({ name, type, top: setTop }) => ({ name, type, top: setTop || top, srcSets: [] })),
+        selectedFilesets: [...selected],
+        files,
+        sourceFiles,
+        ipReferences,
+        includeSimulation,
+        includeDirs: unique(includeDirs),
+        defines: [...new Set(defines)],
+        warnings: [...new Set(warnings)]
+      };
+    }
+    async function collectStandaloneHdlFiles(rootDir) {
+      const skipDirs = /^(\..*|node_modules|dist|output|test-tmp|impl\d*|syntmp|synwork|synlog|backup|.*_tcr\.dir|.*\.dir)$/i;
+      const discovered = [];
+      async function walk(currentDir, depth) {
+        if (depth > 4) return;
+        let entries = [];
+        try {
+          entries = await fs2.readdir(currentDir, { withFileTypes: true });
+        } catch {
+          return;
+        }
+        entries.sort((a, b) => a.name.localeCompare(b.name, "en"));
+        for (const entry of entries) {
+          const fullPath = path2.join(currentDir, entry.name);
+          if (entry.isDirectory()) {
+            if (!skipDirs.test(entry.name)) await walk(fullPath, depth + 1);
+          } else if (entry.isFile()) {
+            const ext = path2.extname(entry.name).toLowerCase();
+            if (HDL_EXTENSIONS.has(ext) || ext === ".vhd" || ext === ".vhdl" || ext === ".sdc") {
+              discovered.push(fullPath);
+            }
+          }
+        }
+      }
+      await walk(rootDir, 0);
+      return discovered;
+    }
+    async function loadStandaloneLpfProject(lpfPath, parsedLpf, options = {}) {
+      const projectRoot = path2.dirname(lpfPath);
+      const projectName = path2.basename(lpfPath, path2.extname(lpfPath));
+      const filesetName = options.fileset || "impl1";
+      if (options.fileset && !["impl1", "sources_1", "impl"].includes(options.fileset)) {
+        throw new Error(`\u627E\u4E0D\u5230 fileset\uFF1A${options.fileset}`);
+      }
+      const warnings = [];
+      const includeSimulation = Boolean(options.includeSimulation);
+      const discovered = await collectStandaloneHdlFiles(projectRoot);
+      const files = [];
+      for (const filePath of discovered) {
+        const base = path2.basename(filePath);
+        const isSim = /^(tb_|test_|.*_tb\.)/i.test(base);
+        const usedIn = isSim ? ["simulation"] : ["synthesis", "simulation"];
+        const selected = includeSimulation || usedIn.includes("synthesis");
+        files.push({
+          path: filePath,
+          rawPath: path2.relative(projectRoot, filePath).replace(/\\/g, "/"),
+          fileset: filesetName,
+          type: inferredType(filePath),
+          exists: true,
+          existence: "exists",
+          enabled: true,
+          usedIn,
+          library: "work",
+          generated: false,
+          selected
+        });
+      }
+      files.push({
+        path: lpfPath,
+        rawPath: path2.basename(lpfPath),
+        fileset: filesetName,
+        type: "LPF",
+        exists: true,
+        existence: "exists",
+        enabled: true,
+        usedIn: ["synthesis", "simulation"],
+        library: "work",
+        generated: false,
+        selected: true,
+        lpf: parsedLpf
+      });
+      const sourceFiles = unique(files.filter((file) => file.enabled && file.selected && file.exists && HDL_EXTENSIONS.has(path2.extname(file.path).toLowerCase())).map((file) => file.path));
+      const includeDirs = [];
+      const defines = [];
+      const addValues = (values, target, resolve) => {
+        for (const value of values) {
+          if (!value || !String(value).trim()) continue;
+          try {
+            target.push(resolve ? resolveXprPath(String(value).trim(), lpfPath) : String(value).trim());
+          } catch (error) {
+            warnings.push(error.message);
+          }
+        }
+      };
+      addValues(array(options.includeDirs), includeDirs, true);
+      addValues(array(options.defines), defines, false);
+      for (const file of sourceFiles.filter((file2) => /\.(vh|svh)$/i.test(file2))) includeDirs.push(path2.dirname(file));
+      const top = await inferTopFromSources(sourceFiles, parsedLpf, projectName);
+      return {
+        path: lpfPath,
+        root: projectRoot,
+        name: projectName,
+        part: "",
+        vivadoVersion: "",
+        diamondVersion: "",
+        projectType: "lattice",
+        ldfPath: null,
+        lpfPath,
+        lpf: parsedLpf,
+        top,
+        filesets: [{ name: filesetName, type: "DesignSrcs", top, srcSets: [] }],
+        selectedFilesets: [filesetName],
+        files,
+        sourceFiles,
+        ipReferences: [],
+        includeSimulation,
+        includeDirs: unique(includeDirs),
+        defines: [...new Set(defines)],
+        warnings: [...new Set(warnings)]
+      };
+    }
+    async function loadLatticeProject(projectPath, options = {}) {
+      const ext = path2.extname(projectPath).toLowerCase();
+      const content = await readSource(projectPath, "auto");
+      const trimmed = content.replace(/^\uFEFF/, "").trimStart();
+      if (ext === ".ldf" || trimmed.startsWith("<")) {
+        if (/<!DOCTYPE\b|<!ENTITY\b/i.test(content)) throw new Error("Lattice \u5DE5\u7A0B\u4E0D\u652F\u6301 DTD \u6216\u81EA\u5B9A\u4E49\u5B9E\u4F53\u58F0\u660E\u3002");
+        const validity = XMLValidator.validate(content);
+        if (validity !== true) throw new Error(`Lattice XML \u65E0\u6548\uFF1A${validity.err.msg}\uFF08\u7B2C ${validity.err.line} \u884C\uFF09`);
+        const parser = new XMLParser({
+          ignoreAttributes: false,
+          attributeNamePrefix: "",
+          removeNSPrefix: true,
+          parseAttributeValue: false,
+          parseTagValue: false,
+          trimValues: false,
+          processEntities: true
+        });
+        const parsed = parser.parse(content);
+        if (!parsed.BaliProject) throw new Error("XML \u6839\u8282\u70B9\u4E0D\u662F Lattice BaliProject\u3002");
+        return loadBaliProject(projectPath, content, parsed.BaliProject, options);
+      }
+      const parsedLpf = parseLpf(content);
+      const companionLdf = await findCompanionLdf(projectPath);
+      if (companionLdf) {
+        const ldfContent = await readSource(companionLdf, "auto");
+        if (/<!DOCTYPE\b|<!ENTITY\b/i.test(ldfContent)) throw new Error("Lattice \u5DE5\u7A0B\u4E0D\u652F\u6301 DTD \u6216\u81EA\u5B9A\u4E49\u5B9E\u4F53\u58F0\u660E\u3002");
+        const validity = XMLValidator.validate(ldfContent);
+        if (validity !== true) throw new Error(`Lattice XML \u65E0\u6548\uFF1A${validity.err.msg}\uFF08\u7B2C ${validity.err.line} \u884C\uFF09`);
+        const parser = new XMLParser({
+          ignoreAttributes: false,
+          attributeNamePrefix: "",
+          removeNSPrefix: true,
+          parseAttributeValue: false,
+          parseTagValue: false,
+          trimValues: false,
+          processEntities: true
+        });
+        const parsed = parser.parse(ldfContent);
+        if (!parsed.BaliProject) throw new Error("XML \u6839\u8282\u70B9\u4E0D\u662F Lattice BaliProject\u3002");
+        return loadBaliProject(companionLdf, ldfContent, parsed.BaliProject, {
+          ...options,
+          selectedProjectPath: projectPath,
+          primaryLpfPath: projectPath,
+          primaryLpf: parsedLpf
+        });
+      }
+      return loadStandaloneLpfProject(projectPath, parsedLpf, options);
     }
     function candidateStubs(xci, xpr) {
       const root = path2.dirname(xpr);
@@ -1902,9 +3485,168 @@ var require_xpr = __commonJS({
       const directory = relative && relative !== ".." && !relative.startsWith(`..${path2.sep}`) && !path2.isAbsolute(relative) ? path2.dirname(relative) : path2.join(designFileset, "ip", name);
       return path2.join(root, `${stem}.gen`, directory, `${name}_sim_netlist.v`);
     }
+    async function loadFilelistProject(filelistPath, options = {}) {
+      const projectRoot = path2.dirname(filelistPath);
+      const projectName = path2.basename(filelistPath, path2.extname(filelistPath)) || path2.basename(filelistPath);
+      const filesetName = options.fileset || "sources_1";
+      if (options.fileset && !["sources_1", "impl1", "filelist"].includes(options.fileset)) {
+        throw new Error(`\u627E\u4E0D\u5230 fileset\uFF1A${options.fileset}`);
+      }
+      const content = await readSource(filelistPath, "auto");
+      if (/\0/.test(content)) throw new Error("Filelist \u5305\u542B\u4E0D\u652F\u6301\u7684\u7A7A\u5B57\u7B26\u6216\u4E8C\u8FDB\u5236\u5185\u5BB9\u3002");
+      const source = content.replace(/^\uFEFF/, "");
+      let commentTop = "";
+      const topMatch = source.match(/^\s*\/\/\s*Top:\s*([A-Za-z_][A-Za-z0-9_$]*)\s*$/m);
+      if (topMatch && topMatch[1] !== "not") commentTop = topMatch[1];
+      const tokens = [];
+      let i = 0;
+      while (i < source.length) {
+        const ch = source[i];
+        if (/\s/.test(ch)) {
+          i++;
+          continue;
+        }
+        if (ch === "#" || source.startsWith("//", i)) {
+          const end = source.indexOf("\n", i + 1);
+          i = end < 0 ? source.length : end + 1;
+          continue;
+        }
+        if (source.startsWith("/*", i)) {
+          const end = source.indexOf("*/", i + 2);
+          if (end < 0) throw new Error("Filelist \u4E2D\u5B58\u5728\u672A\u95ED\u5408\u7684\u5757\u6CE8\u91CA\u3002");
+          i = end + 2;
+          continue;
+        }
+        if (ch === '"') {
+          let value = "";
+          i++;
+          let closed = false;
+          while (i < source.length) {
+            if (source[i] === "\\" && i + 1 < source.length && source[i + 1] === '"') {
+              value += '"';
+              i += 2;
+              continue;
+            }
+            if (source[i] === "\r" || source[i] === "\n") break;
+            if (source[i] === '"') {
+              closed = true;
+              i++;
+              break;
+            }
+            value += source[i++];
+          }
+          if (!closed) throw new Error("Filelist \u4E2D\u5B58\u5728\u672A\u95ED\u5408\u7684\u5F15\u53F7\u3002");
+          if (value.trim()) tokens.push(value.trim());
+          continue;
+        }
+        const start = i;
+        while (i < source.length && !/[\s"]/.test(source[i]) && !source.startsWith("//", i) && !source.startsWith("/*", i)) i++;
+        const token = source.slice(start, i);
+        if (token) tokens.push(token);
+      }
+      const warnings = [];
+      const includeDirs = [];
+      const defines = [];
+      const rawFiles = [];
+      let explicitTop = "";
+      const addInclude = (raw) => {
+        if (!raw || !raw.trim()) return;
+        try {
+          includeDirs.push(resolveXprPath(raw.trim(), filelistPath));
+        } catch (error) {
+          warnings.push(error.message);
+        }
+      };
+      const valueFlags = /* @__PURE__ */ new Set(["--error-limit", "-timescale", "--timescale", "-work", "--work", "-L"]);
+      for (let idx = 0; idx < tokens.length; idx++) {
+        const tok = tokens[idx];
+        if (tok.startsWith("+incdir+")) {
+          for (const dir of tok.slice("+incdir+".length).split("+").filter(Boolean)) addInclude(dir);
+        } else if (tok.startsWith("+define+")) {
+          for (const def of tok.slice("+define+".length).split("+").filter(Boolean)) defines.push(def);
+        } else if (tok === "-I" || tok === "--incdir" || tok === "-incdir" || tok === "-y") {
+          if (tokens[idx + 1]) addInclude(tokens[++idx]);
+        } else if (tok.startsWith("-I") && tok.length > 2) {
+          addInclude(tok.slice(2));
+        } else if (tok === "-D" || tok === "--define" || tok === "-define") {
+          if (tokens[idx + 1]) defines.push(tokens[++idx]);
+        } else if (tok.startsWith("-D") && tok.length > 2) {
+          defines.push(tok.slice(2));
+        } else if (tok === "--top" || tok === "-top") {
+          if (tokens[idx + 1]) explicitTop = tokens[++idx];
+        } else if (tok === "-v") {
+          if (tokens[idx + 1]) rawFiles.push(tokens[++idx]);
+        } else if (valueFlags.has(tok)) {
+          idx++;
+        } else if (tok.startsWith("-") || tok.startsWith("+")) {
+          continue;
+        } else {
+          rawFiles.push(tok);
+        }
+      }
+      const includeSimulation = Boolean(options.includeSimulation);
+      const files = [];
+      for (const rawPath of rawFiles) {
+        let resolved = null;
+        try {
+          resolved = resolveXprPath(rawPath, filelistPath);
+        } catch (error) {
+          warnings.push(`${filesetName}\uFF1A${error.message}`);
+        }
+        files.push({
+          path: resolved,
+          rawPath,
+          fileset: filesetName,
+          type: inferredType(rawPath),
+          exists: false,
+          existence: "unknown",
+          enabled: true,
+          usedIn: ["synthesis", "simulation"],
+          library: "work",
+          generated: false,
+          selected: true
+        });
+      }
+      await Promise.all(files.map(async (file) => {
+        if (file.path) {
+          try {
+            file.exists = await isFile(file.path);
+            file.existence = file.exists ? "exists" : "missing";
+          } catch (error) {
+            warnings.push(`\u65E0\u6CD5\u68C0\u67E5\u6587\u4EF6 ${file.path}\uFF1A${error.message}`);
+          }
+        }
+        if (file.path && !file.exists && file.enabled && file.selected) warnings.push(`\u5DE5\u7A0B\u6587\u4EF6\u4E0D\u5B58\u5728\uFF1A${file.path}`);
+      }));
+      const sourceFiles = unique(files.filter((file) => file.enabled && file.selected && file.exists && HDL_EXTENSIONS.has(path2.extname(file.path).toLowerCase())).map((file) => file.path));
+      for (const dir of array(options.includeDirs)) addInclude(String(dir));
+      for (const def of array(options.defines)) if (def && String(def).trim()) defines.push(String(def).trim());
+      for (const file of sourceFiles.filter((file2) => /\.(vh|svh)$/i.test(file2))) includeDirs.push(path2.dirname(file));
+      const top = explicitTop || commentTop || await inferTopFromSources(sourceFiles, null, projectName);
+      return {
+        path: filelistPath,
+        root: projectRoot,
+        name: projectName,
+        part: "",
+        vivadoVersion: "",
+        projectType: "filelist",
+        top,
+        filesets: [{ name: filesetName, type: "DesignSrcs", top, srcSets: [] }],
+        selectedFilesets: [filesetName],
+        files,
+        sourceFiles,
+        ipReferences: [],
+        includeSimulation,
+        includeDirs: unique(includeDirs),
+        defines: [...new Set(defines)],
+        warnings: [...new Set(warnings)]
+      };
+    }
     async function loadProject2(xprPath, options = {}) {
       const projectPath = path2.resolve(xprPath);
-      if (path2.extname(projectPath).toLowerCase() !== ".xpr") throw new Error("\u8BF7\u9009\u62E9 Vivado .xpr \u5DE5\u7A0B\u6587\u4EF6\u3002");
+      const ext = path2.extname(projectPath).toLowerCase();
+      if (ext === ".lpf" || ext === ".ldf") return loadLatticeProject(projectPath, options);
+      if (ext !== ".xpr") return loadFilelistProject(projectPath, options);
       const xml = await fs2.readFile(projectPath, "utf8");
       if (/<!DOCTYPE\b|<!ENTITY\b/i.test(xml)) throw new Error("XPR \u4E0D\u652F\u6301 DTD \u6216\u81EA\u5B9A\u4E49\u5B9E\u4F53\u58F0\u660E\u3002");
       const validity = XMLValidator.validate(xml);
@@ -2135,6 +3877,11 @@ var require_xpr = __commonJS({
         `// Output file: ${slash(options.outputPath)}`,
         `// Project: ${comment(project.name)}`,
         `// XPR: ${slash(project.path)}`,
+        ...project.projectType === "lattice" ? [
+          `// Lattice LDF: ${slash(project.ldfPath)}`,
+          `// Lattice LPF: ${slash(project.lpfPath)}`,
+          ...project.lpf ? [`// LPF constraints: locates ${project.lpf.locates.length}; iobufs ${project.lpf.iobufs.length}; frequencies ${project.lpf.frequencies.length}`] : []
+        ] : [],
         `// Part: ${comment(project.part)}`,
         `// XPR-recorded Vivado version: ${comment(project.vivadoVersion)} (not the installed tool version).`,
         `// Exported at (ISO 8601 with timezone): ${comment(options.exportedAt || (/* @__PURE__ */ new Date()).toISOString())}`,
@@ -2159,7 +3906,7 @@ var require_xpr = __commonJS({
       return `${lines.join("\n")}
 `;
     }
-    module2.exports = { loadProject: loadProject2, resolveXprPath, filelist: filelist2 };
+    module2.exports = { loadProject: loadProject2, resolveXprPath, filelist: filelist2, parseLpf };
   }
 });
 
@@ -2184,7 +3931,7 @@ Paths are relative to the output file directory (absolute across Windows drives)
 This does not run Vivado, elaborate a design, generate IP or determine compile order.
 `;
 function parseArgs(args) {
-  const values = /* @__PURE__ */ new Set(["--xpr", "--out", "--fileset", "--top"]);
+  const values = /* @__PURE__ */ new Set(["--xpr", "--lpf", "--ldf", "--out", "--fileset", "--top"]);
   const switches = /* @__PURE__ */ new Set(["--with-sim", "--force", "--help"]);
   const parsed = {};
   const seen = /* @__PURE__ */ new Set();
@@ -2203,7 +3950,10 @@ function parseArgs(args) {
     if (seen.size !== 1) throw new Error("--help \u4E0D\u80FD\u4E0E\u5BFC\u51FA\u53C2\u6570\u540C\u65F6\u4F7F\u7528\u3002");
     return parsed;
   }
-  if (!parsed.xpr || !parsed.out) throw new Error("\u5FC5\u987B\u63D0\u4F9B --xpr <project.xpr> \u548C --out <sources.f>\u3002");
+  const projectFlags = [parsed.xpr, parsed.lpf, parsed.ldf].filter(Boolean);
+  if (projectFlags.length > 1) throw new Error("\u53C2\u6570\u91CD\u590D\uFF1A\u4E0D\u80FD\u540C\u65F6\u6307\u5B9A\u591A\u4E2A\u5DE5\u7A0B\u6587\u4EF6\u53C2\u6570\u3002");
+  parsed.xpr = projectFlags[0];
+  if (!parsed.xpr || !parsed.out) throw new Error("\u5FC5\u987B\u63D0\u4F9B --xpr <project.xpr>\uFF08\u6216 --lpf / --ldf\uFF09\u548C --out <sources.f>\u3002");
   return parsed;
 }
 var canonical = (file) => {
@@ -2236,6 +3986,8 @@ async function realComparable(file) {
 async function checkOutput(project, output, force) {
   const inputs = [...new Set([
     project.path,
+    project.ldfPath,
+    project.lpfPath,
     ...project.files.map((file) => file.path),
     ...project.ipReferences.flatMap((reference) => [reference.path, ...reference.artifactPaths])
   ].filter(Boolean))];
