@@ -2,7 +2,7 @@
   "name": "fpga-workbench",
   "displayName": "FPGA Workbench · 工程导航",
   "description": "打开 Vivado (Xilinx) .xpr 或 Diamond (Lattice) .lpf/.ldf 工程，浏览工程文件和模块层级，跳转 Verilog/SystemVerilog 模块、端口与信号。",
-  "version": "0.2.30",
+  "version": "0.2.31",
   "publisher": "fpga-go",
   "icon": "media/fpga-go-marketplace.png",
   "galleryBanner": {
