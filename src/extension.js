@@ -22,6 +22,7 @@ class Workbench {
     this.index = new HdlIndex();
     this.backend = new SlangBackend();
     this.texts = new Map();
+    this.dirtyDocs = new Map();
     this.members = new Set();
     this.symbolRegistration = undefined;
     this.watchers = [];
@@ -29,12 +30,14 @@ class Workbench {
     this.sourceRevision = 0;
     this.disposed = false;
     this.project = undefined;
+    this.hierCacheMode = '';
+    this.hierRoots = undefined;
+    this.selectedHierNode = undefined;
+    this.lastRevealedId = undefined;
     this.candidates = new CandidatePages(vscode, this);
     context.subscriptions.push(this.candidates);
     this.fileset = context.workspaceState.get('fileset');
     this.top = context.workspaceState.get('top');
-    this.projectType = context.workspaceState.get('projectType') || this.config().get('projectType','vivado');
-    void this.syncProjectTypeContext();
     this.output = vscode.window.createOutputChannel('FPGA Workbench');
     this.change = new vscode.EventEmitter();
     this.status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 15);
@@ -44,23 +47,26 @@ class Workbench {
     this.fileView = vscode.window.createTreeView('fpgaWorkbench.files', {treeDataProvider:{
       onDidChangeTreeData:this.change.event, getTreeItem:n=>n, getChildren:n=>this.fileChildren(n)
     }});
-    this.hierView = vscode.window.createTreeView('fpgaWorkbench.hierarchy', {treeDataProvider:{
-      onDidChangeTreeData:this.change.event, getTreeItem:n=>n, getChildren:n=>this.hierChildren(n)
+    this.hierView = vscode.window.createTreeView('fpgaWorkbench.hierarchy', {showCollapseAll:true, treeDataProvider:{
+      onDidChangeTreeData:this.change.event, getTreeItem:n=>n, getChildren:n=>this.hierChildren(n), getParent:n=>n?.parent
     }});
+    const selectionSub = vscode.window.onDidChangeTextEditorSelection?.(e => {
+      if(!vscode.window.activeTextEditor || e.textEditor === vscode.window.activeTextEditor) this.scheduleHierarchySync(e.textEditor);
+    });
+    const hierVisSub = this.hierView.onDidChangeVisibility?.(e => {
+      if(e.visible) this.scheduleHierarchySync(vscode.window.activeTextEditor);
+    });
     context.subscriptions.push(this.output,this.change,this.status,this.fileView,this.hierView,
+      ...[selectionSub,hierVisSub].filter(Boolean),
       vscode.workspace.onDidChangeTextDocument(e=>this.changedDocument(e.document)),
       vscode.workspace.onDidOpenTextDocument(d=>this.changedDocument(d)),
       vscode.workspace.onDidCloseTextDocument(d=>this.closedDocument(d)),
       vscode.workspace.onDidChangeConfiguration(e=> {
-        if(e.affectsConfiguration('fpgaWorkbench.projectType') && !this.context.workspaceState.get('projectType')) {
-          this.projectType = this.config().get('projectType','vivado');
-          void this.syncProjectTypeContext();
-        }
         if(['backend','slangPath','sourceEncoding','includeSimulation','extraIncludeDirs','extraDefines','watchFiles']
           .some(name=>e.affectsConfiguration(`fpgaWorkbench.${name}`))) this.scheduleRefresh();
       }),
-      vscode.workspace.onDidChangeWorkspaceFolders(()=>this.change.fire()),
-      vscode.window.onDidChangeActiveTextEditor(()=>this.updateEditorContext()),
+      vscode.workspace.onDidChangeWorkspaceFolders(()=>this.fireTreeChange()),
+      vscode.window.onDidChangeActiveTextEditor(editor=>{void this.updateEditorContext();this.scheduleHierarchySync(editor || vscode.window.activeTextEditor);}),
       vscode.languages.registerDefinitionProvider(selector,{provideDefinition:async(d,p,t)=> {
         const items=await this.definitions(d,p,t);
         if(t?.isCancellationRequested)return [];
@@ -71,33 +77,19 @@ class Workbench {
       {dispose:()=>this.dispose()});
   }
   config() { return vscode.workspace.getConfiguration('fpgaWorkbench'); }
-  syncProjectTypeContext() {
-    const type = ['vivado','lattice','filelist'].includes(this.projectType) ? this.projectType : 'vivado';
-    return vscode.commands.executeCommand('setContext','fpgaWorkbench.projectType',type);
+  clearTimers() {
+    clearTimeout(this.refreshTimer); this.refreshTimer = undefined;
+    clearTimeout(this.treeTimer); this.treeTimer = undefined;
+    clearTimeout(this.parseTimer); this.parseTimer = undefined;
+    clearTimeout(this.selectionTimer); this.selectionTimer = undefined;
   }
-  async selectProjectType(requested) {
-    const revision = this.revision;
-    let type = ['vivado','lattice','filelist'].includes(requested) ? requested : undefined;
-    if(!type) {
-      const current = ['vivado','lattice','filelist'].includes(this.projectType) ? this.projectType : 'vivado';
-      const picked = await vscode.window.showQuickPick([
-        {label:'Vivado (Xilinx) 工程',description:`.xpr${current==='vivado'?'（当前）':''}`,value:'vivado'},
-        {label:'Diamond (Lattice) 工程',description:`.lpf / .ldf${current==='lattice'?'（当前）':''}`,value:'lattice'},
-        {label:'Filelist / 所有文件',description:`.f / *.*（未知类型按 Filelist 解析）${current==='filelist'?'（当前）':''}`,value:'filelist'}
-      ],{title:'选择工程类型：Vivado (Xilinx) / Diamond (Lattice) / Filelist'});
-      if(!picked || !this.isCurrent(revision)) return;
-      type = picked.value;
-    }
-    this.projectType = type;
-    await Promise.all([
-      this.context.workspaceState.update('projectType',type),
-      this.syncProjectTypeContext()
-    ]);
-    const label = type === 'lattice' ? 'Diamond (Lattice)' : type === 'filelist' ? 'Filelist / 所有文件' : 'Vivado (Xilinx)';
-    this.output.appendLine(`工程类型：${label}`);
-    return type;
+  fireTreeChange() {
+    this.hierRoots = undefined;
+    this.lastRevealedId = undefined;
+    this.change.fire();
+    if(this.project && this.hierView?.visible !== false) this.scheduleHierarchySync(vscode.window.activeTextEditor);
   }
-  candidateText(uri) { return uri.scheme === 'file' && this.members.has(key(uri.fsPath)) ? this.texts.get(key(uri.fsPath)) : undefined; }
+  candidateText(uri) { return uri.scheme === 'file' && this.members.has(key(uri.fsPath)) ? (this.dirtyDocs.get(key(uri.fsPath))?.getText() ?? this.texts.get(key(uri.fsPath))) : undefined; }
   candidatePage(items) { return this.config().get('navigation.candidateList','native') === 'summary' ? this.candidates.location(items) : undefined; }
   node(label, options={}) {
     const item = new vscode.TreeItem(label,options.children ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.None);
@@ -108,26 +100,20 @@ class Workbench {
   async selectProject(uri) {
     if (!uri) {
       const revision = this.revision;
-      const type = this.projectType || this.config().get('projectType','vivado');
-      const filters = type === 'lattice'
-        ? {'Diamond (Lattice) 工程':['lpf','ldf'],'Vivado (Xilinx) 工程':['xpr'],'All Files (按 Filelist 解析)':['*']}
-        : type === 'filelist'
-          ? {'All Files (按 Filelist 解析)':['*'],'Vivado (Xilinx) 工程':['xpr'],'Diamond (Lattice) 工程':['lpf','ldf']}
-          : {'Vivado (Xilinx) 工程':['xpr'],'Diamond (Lattice) 工程':['lpf','ldf'],'All Files (按 Filelist 解析)':['*']};
-      const title = type === 'lattice'
-        ? '选择 Diamond (Lattice) 工程 (.lpf / .ldf)'
-        : type === 'filelist'
-          ? '选择 Filelist 或任意工程文件'
-          : '选择 Vivado (Xilinx) 工程 (.xpr)';
-      const picked = await vscode.window.showOpenDialog({title,filters,canSelectMany:false});
+      const picked = await vscode.window.showOpenDialog({
+        title:'选择 FPGA 工程文件',
+        filters:{
+          'FPGA 工程 (.xpr, .lpf, .ldf, .f)':['xpr','lpf','ldf','f'],
+          'Vivado (Xilinx) 工程 (.xpr)':['xpr'],
+          'Diamond (Lattice) 工程 (.lpf, .ldf)':['lpf','ldf'],
+          'All Files (按 Filelist 解析)':['*']
+        },
+        canSelectMany:false
+      });
       if(!picked?.length || !this.isCurrent(revision)) return;
       uri = picked[0];
     }
     const xpr = typeof uri === 'string' ? uri : uri.fsPath;
-    const ext = path.extname(xpr).toLowerCase();
-    if(ext === '.lpf' || ext === '.ldf') { this.projectType = 'lattice'; void this.syncProjectTypeContext(); }
-    else if(ext === '.xpr') { this.projectType = 'vivado'; void this.syncProjectTypeContext(); }
-    else { this.projectType = 'filelist'; void this.syncProjectTypeContext(); }
     this.fileset = undefined; this.top = undefined;
     const loading = this.load(xpr), revision = this.revision;
     if(!await loading || !this.isCurrent(revision)) return;
@@ -163,8 +149,7 @@ class Workbench {
     const revision = ++this.revision;
     const current = () => this.isCurrent(revision);
     const fileset = this.fileset, top = this.top, cfg = this.config();
-    clearTimeout(this.refreshTimer);
-    clearTimeout(this.treeTimer);
+    this.clearTimers();
     this.clearWatchers();
     this.clearProjectView();
     this.loadTarget = xpr;
@@ -178,32 +163,48 @@ class Workbench {
         if(!current()) return false;
         const project = await loadProject(xpr,{fileset,includeSimulation:cfg.get('includeSimulation'),includeDirs:cfg.get('extraIncludeDirs'),defines:cfg.get('extraDefines')});
         if(!current()) return false;
-        const index = new HdlIndex(); const texts = new Map();
-        for(const file of project.sourceFiles) {
-          try {
-            const opened = vscode.workspace.textDocuments.find(d=>d.uri.scheme === 'file' && key(d.uri.fsPath) === key(file));
-            const text = opened ? opened.getText() : await readSource(file,cfg.get('sourceEncoding','auto'));
-            if(!current()) return false;
-            index.update(file,text); texts.set(key(file),text);
-          } catch(err) {project.warnings.push(`${file}: ${err.message}`);}
-        }
-        if(!current()) return false;
-        const newMembers=new Set(project.sourceFiles.map(key));
+        const encoding = cfg.get('sourceEncoding','auto');
+        const openByKey = new Map();
         for(const doc of vscode.workspace.textDocuments) {
-          if(doc.uri.scheme==='file' && newMembers.has(key(doc.uri.fsPath))) {
-            index.update(doc.uri.fsPath,doc.getText());texts.set(key(doc.uri.fsPath),doc.getText());
+          if(doc.uri.scheme === 'file') openByKey.set(key(doc.uri.fsPath),doc);
+        }
+        const texts = new Map(), batchEntries = [];
+        for(let i = 0; i < project.sourceFiles.length; i += 16) {
+          const chunk = project.sourceFiles.slice(i, i + 16);
+          const results = await Promise.all(chunk.map(async file => {
+            try {
+              const opened = openByKey.get(key(file));
+              const text = opened ? opened.getText() : await readSource(file,encoding);
+              return {file,text};
+            } catch(err) { return {file,err}; }
+          }));
+          if(!current()) return false;
+          for(const item of results) {
+            if(item.err) project.warnings.push(`${item.file}: ${item.err.message}`);
+            else { batchEntries.push([item.file,item.text]); texts.set(key(item.file),item.text); }
           }
         }
+        if(!current()) return false;
+        const newMembers = new Set(project.sourceFiles.map(key));
+        for(const doc of vscode.workspace.textDocuments) {
+          if(doc.uri.scheme==='file' && newMembers.has(key(doc.uri.fsPath))) {
+            const text = doc.getText();
+            batchEntries.push([doc.uri.fsPath,text]); texts.set(key(doc.uri.fsPath),text);
+          }
+        }
+        const index = new HdlIndex();
+        index.updateBatch(batchEntries);
         this.project = project; this.index = index; this.texts = texts;
-        this.members = new Set(project.sourceFiles.map(key));
+        this.dirtyDocs.clear();
+        this.members = newMembers;
         this.linting?.projectChanged(false);
         this.registerDocumentSymbols();
         await vscode.commands.executeCommand('setContext','fpgaWorkbench.loaded',true);
         await this.updateEditorContext();
         if(!current()) return false;
-        this.change.fire();
+        this.fireTreeChange();
         for(const warning of project.warnings) this.output.appendLine(warning);
-        try {await this.backend.start({context:this.context,project:{...project,top:top || project.top},output:this.output,onChange:()=>{if(current())this.refreshStatus();}});}
+        try {await this.backend.start({context:this.context,project:{...project,top:top || project.top},output:this.output,texts,onChange:()=>{if(current())this.refreshStatus();}});}
         catch(err) {if(current())this.output.appendLine(`语义服务未就绪，使用结构索引：${err.message}`);}
         if(!current()) {await this.backend.stop();return false;}
         if(cfg.get('watchFiles')) this.installWatchers();
@@ -235,11 +236,13 @@ class Workbench {
     });
   }
   clearProjectView() {
+    this.clearTimers();
     this.linting?.projectChanged(true);
     this.disposeDocumentSymbols();
     this.project = undefined;this.loadTarget = undefined;
     ++this.sourceRevision;
-    this.index = new HdlIndex();this.texts.clear();this.members.clear();
+    this.index = new HdlIndex();this.texts.clear();this.dirtyDocs.clear();this.members.clear();
+    this.hierRoots = undefined;this.selectedHierNode = undefined;this.lastRevealedId = undefined;
     this.status.text = '$(circuit-board) FPGA: 选择工程';this.status.tooltip = undefined;
     this.fileView.description = undefined;this.hierView.description = undefined;
     void vscode.commands.executeCommand('setContext','fpgaWorkbench.loaded',false);
@@ -248,7 +251,7 @@ class Workbench {
   }
   async closeProject() {
     ++this.revision;
-    clearTimeout(this.refreshTimer);clearTimeout(this.treeTimer);this.clearWatchers();
+    this.clearTimers();this.clearWatchers();
     this.fileset = undefined;this.top = undefined;
     this.clearProjectView();
     this.linting?.reset();
@@ -267,7 +270,7 @@ class Workbench {
     this.status.tooltip = `${this.project.path}\n${this.project.sourceFiles.length} 个源文件；${this.project.warnings.length} 条提示\n点击查看路径和索引状态`;
     this.hierView.description = semantic ? (counts.errors ? '语义层级 · 存在解析诊断' : '语义层级') : '结构层级（未展开条件）';
     this.fileView.description = `${this.project.sourceFiles.length} 个源文件`;
-    this.change.fire();
+    this.fireTreeChange();
   }
   async refresh() {if(this.loadTarget || this.project) await this.load(this.loadTarget || this.project.path); else await this.selectProject();}
   scheduleRefresh() {
@@ -275,41 +278,109 @@ class Workbench {
     const revision=this.revision;
     if(!target)return;
     clearTimeout(this.refreshTimer);
-    this.refreshTimer=setTimeout(()=>{if(this.isCurrent(revision) && target === this.loadTarget) this.load(target).catch(e=>this.report(e));},600);
+    this.refreshTimer=setTimeout(()=>{this.refreshTimer=undefined;if(this.isCurrent(revision) && target === this.loadTarget) this.load(target).catch(e=>this.report(e));},600);
   }
   report(e) {this.output.appendLine(e.stack || String(e));vscode.window.showErrorMessage(`FPGA Workbench: ${e.message || e}`);}
   clearWatchers() {for(const w of this.watchers) w.dispose();this.watchers=[];}
   installWatchers() {
+    const configPaths = [
+      this.project.path,
+      this.project.ldfPath,
+      this.project.lpfPath,
+      ...(this.project.ipReferences || []).map(ip=>ip.path).filter(Boolean)
+    ].filter(Boolean);
+    const configKeys = new Set(configPaths.map(key));
     const paths = new Set(this.project.files.filter(f=>f.path).map(f=>f.path));
-    paths.add(this.project.path);
-    if(this.project.ldfPath) paths.add(this.project.ldfPath);
-    if(this.project.lpfPath) paths.add(this.project.lpfPath);
+    for(const p of configPaths) paths.add(p);
     const watchedKeys = new Set([...paths].map(key));
     const dirs = new Set([...paths].map(p=>path.dirname(p)));
     for(const dir of this.project.includeDirs) dirs.add(dir);
+    const root = this.project.root;
+    const insideRoot = [], outsideRoot = [];
     for(const dir of dirs) {
-      const w = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(dir,'*'));
+      const rel = root ? path.relative(root,dir) : '..';
+      if(root && !rel.startsWith('..') && !path.isAbsolute(rel)) insideRoot.push(rel);
+      else outsideRoot.push(dir);
+    }
+    const patterns = [];
+    if(insideRoot.length) {
+      const recursive = insideRoot.some(rel=>rel !== '' && rel !== '.');
+      patterns.push(new vscode.RelativePattern(root,recursive ? '**/*' : '*'));
+    }
+    for(const dir of outsideRoot) patterns.push(new vscode.RelativePattern(dir,'*'));
+    const revision = this.revision;
+    for(const pattern of patterns) {
+      const w = vscode.workspace.createFileSystemWatcher(pattern);
       const change = (uri,type) => {
-        if(!watchedKeys.has(key(uri.fsPath)) && !/\.(vh|svh)$/i.test(uri.fsPath)) return;
+        const fileKey = key(uri.fsPath);
+        if(!watchedKeys.has(fileKey) && !/\.(vh|svh)$/i.test(uri.fsPath)) return;
         ++this.sourceRevision;
         this.backend.changed(uri,type);
-        this.scheduleRefresh();
+        if(type !== 2 || configKeys.has(fileKey) || !/\.(v|sv|vh|svh)$/i.test(uri.fsPath)) {
+          this.scheduleRefresh();
+          return;
+        }
+        if(!this.members.has(fileKey)) return;
+        const opened = vscode.workspace.textDocuments.find(d=>d.uri.scheme === 'file' && key(d.uri.fsPath) === fileKey);
+        if(opened) {
+          this.flushDirtyDocuments(opened);
+          this.scheduleTreeRefresh();
+        } else {
+          void readSource(uri.fsPath,this.config().get('sourceEncoding','auto')).then(text => {
+            if(!this.isCurrent(revision) || !this.members.has(fileKey)) return;
+            this.index.update(uri.fsPath,text);
+            this.texts.set(fileKey,text);
+            this.scheduleTreeRefresh();
+          }).catch(()=>{if(this.isCurrent(revision))this.scheduleRefresh();});
+        }
       };
       this.watchers.push(w,w.onDidChange(u=>change(u,2)),w.onDidCreate(u=>change(u,1)),w.onDidDelete(u=>change(u,3)));
     }
   }
   changedDocument(doc) {
     if(doc.uri.scheme !== 'file' || !this.members.has(key(doc.uri.fsPath))) return;
-    const text=doc.getText();
-    if(this.texts.get(key(doc.uri.fsPath))!==text)++this.sourceRevision;
-    this.index.update(doc.uri.fsPath,text);this.texts.set(key(doc.uri.fsPath),text);
-    clearTimeout(this.treeTimer);this.treeTimer=setTimeout(()=>this.change.fire(),250);
+    const docKey = key(doc.uri.fsPath);
+    const text = doc.getText();
+    if(this.texts.get(docKey) !== text || this.dirtyDocs.has(docKey)) ++this.sourceRevision;
+    this.dirtyDocs.set(docKey,doc);
+    clearTimeout(this.parseTimer);
+    this.parseTimer = setTimeout(()=>{this.parseTimer=undefined;this.flushDirtyDocuments(undefined,true);},250);
+  }
+  flushDirtyDocuments(extraDoc, notifyTree = false) {
+    clearTimeout(this.parseTimer);
+    this.parseTimer = undefined;
+    if(extraDoc?.uri?.scheme === 'file' && this.members.has(key(extraDoc.uri.fsPath))) {
+      const extraKey = key(extraDoc.uri.fsPath);
+      const text = extraDoc.getText();
+      if(!this.dirtyDocs.has(extraKey) && this.texts.get(extraKey) !== text) {
+        ++this.sourceRevision;
+        this.dirtyDocs.set(extraKey,extraDoc);
+      }
+    }
+    if(!this.dirtyDocs.size) return;
+    const entries = [];
+    for(const [docKey,doc] of this.dirtyDocs) {
+      if(!this.members.has(docKey)) continue;
+      const text = doc.getText();
+      entries.push([doc.uri.fsPath,text]);
+      this.texts.set(docKey,text);
+    }
+    this.dirtyDocs.clear();
+    if(entries.length === 1) this.index.update(entries[0][0],entries[0][1]);
+    else if(entries.length > 1) this.index.updateBatch(entries);
+    if(notifyTree) this.fireTreeChange();
+    else this.scheduleTreeRefresh();
+  }
+  scheduleTreeRefresh() {
+    clearTimeout(this.treeTimer);
+    this.treeTimer = setTimeout(()=>{this.treeTimer=undefined;this.fireTreeChange();},250);
   }
   async closedDocument(doc) {
     if(doc.uri.scheme !== 'file' || !this.members.has(key(doc.uri.fsPath))) return;
+    this.dirtyDocs.delete(key(doc.uri.fsPath));
     const revision=this.revision;
-    try {const text=await readSource(doc.uri.fsPath,this.config().get('sourceEncoding','auto'));if(!this.isCurrent(revision))return;if(this.texts.get(key(doc.uri.fsPath))!==text)++this.sourceRevision;this.index.update(doc.uri.fsPath,text);this.texts.set(key(doc.uri.fsPath),text);this.change.fire();}
-    catch {if(!this.isCurrent(revision))return;++this.sourceRevision;this.index.remove(doc.uri.fsPath);this.texts.delete(key(doc.uri.fsPath));this.change.fire();}
+    try {const text=await readSource(doc.uri.fsPath,this.config().get('sourceEncoding','auto'));if(!this.isCurrent(revision))return;if(this.texts.get(key(doc.uri.fsPath))!==text)++this.sourceRevision;this.index.update(doc.uri.fsPath,text);this.texts.set(key(doc.uri.fsPath),text);this.fireTreeChange();}
+    catch {if(!this.isCurrent(revision))return;++this.sourceRevision;this.index.remove(doc.uri.fsPath);this.texts.delete(key(doc.uri.fsPath));this.fireTreeChange();}
   }
   fileChildren(node) {
     if(!this.project) return [];
@@ -336,15 +407,30 @@ class Workbench {
   }
   async hierChildren(node) {
     if(!this.project) return [];
+    this.flushDirtyDocuments();
+    const cacheMode = `${this.revision}:${this.sourceRevision}:${this.backend.running}`;
+    if(this.hierCacheMode !== cacheMode) { this.hierCacheMode = cacheMode; this.hierRoots = undefined; }
+    if(!node && this.hierRoots) return this.hierRoots;
+    if(node && node._childrenMode === cacheMode && node._children) return node._children;
     const revision=this.revision;
     if(this.backend.running) {
       try {
         const raw = await this.backend.hierarchy(node?.hierPath || '');
         if(!this.isCurrent(revision))return [];
-        if(raw?.length || node) return (raw || []).filter(x=>['Instance','Scope','GenerateBlock','GenerateBlockArray','InstanceArray'].includes(x.kind)).map(x=>{
-          const hierPath = [node?.hierPath,x.instName].filter(Boolean).join('.');
-          return this.node(x.instName || x.declName || x.kind,{children:x.hasChildren !== false,description:x.declName || x.kind,icon:x.kind==='Instance'?'symbol-module':'symbol-namespace',hierPath,command:{command:'fpgaWorkbench.openHierarchy',title:'打开模块',arguments:[hierPath]}});
-        });
+        if(raw?.length || node) {
+          const seen = new Set();
+          const items = (raw || []).filter(x=>['Instance','Scope','GenerateBlock','GenerateBlockArray','InstanceArray'].includes(x.kind)).map((x,idx)=>{
+            const seg = x.instName || x.declName || x.kind;
+            const hierPath = node?.hierPath ? `${node.hierPath}${seg.startsWith('[') ? '' : '.'}${seg}` : seg;
+            let id = `slang:${hierPath}`;
+            if(seen.has(id)) id = `${id}#${idx}`;
+            seen.add(id);
+            return this.node(seg,{id,parent:node,_cacheMode:cacheMode,children:x.hasChildren !== false,description:x.declName || x.kind,icon:x.kind==='Instance'?'symbol-module':'symbol-namespace',hierPath,instName:x.instName,declName:x.declName,instLoc:x.instLoc,declLoc:x.declLoc,command:{command:'fpgaWorkbench.openHierarchy',title:'打开模块',arguments:[hierPath,id]}});
+          });
+          if(node) { node._childrenMode = cacheMode; node._children = items; }
+          else this.hierRoots = items;
+          return items;
+        }
       } catch(e) {if(!this.isCurrent(revision))return [];this.output.appendLine(`层级暂不可用: ${e.message}`);}
     }
     const mods = this.index.modules();
@@ -352,18 +438,164 @@ class Workbench {
       const top=this.top || this.project.top;
       const roots=mods.filter(m=>m.name===top);
       const called=new Set(mods.flatMap(m=>m.instances.map(i=>i.type)));
-      return (roots.length?roots:mods.filter(m=>!called.has(m.name))).map(m=>this.moduleNode(m,[],m.name));
+      const items = (roots.length?roots:mods.filter(m=>!called.has(m.name))).map(m=>this.moduleNode(m,[],m.name,undefined,`${m.path}:${m.start}`,cacheMode));
+      this.hierRoots = items;
+      return items;
     }
     if(!node.module) return [];
-    return node.module.instances.flatMap(inst=> {
+    const items = node.module.instances.flatMap(inst=> {
       const targets=mods.filter(m=>m.name===inst.type);
-      if(!targets.length) return [this.node(inst.name,{description:`${inst.type} · 外部/IP 未解析`,icon:'question',command:{command:'fpgaWorkbench.openLocation',title:'打开实例',arguments:[{path:node.module.path,start:inst.start,end:inst.end}]}})];
-      return targets.map(m=>this.moduleNode(m,node.ancestors,`${inst.name} : ${m.name}`));
+      if(!targets.length) {
+        const lineage = `${node.lineage}->inst:${inst.start}:${inst.name}`;
+        const id = `builtin:${lineage}`;
+        return [this.node(inst.name,{id,parent:node,lineage,_cacheMode:cacheMode,instName:inst.name,instType:inst.type,instStart:inst.start,parentModulePath:node.module.path,description:`${inst.type} · 外部/IP 未解析`,icon:'question',command:{command:'fpgaWorkbench.openLocation',title:'打开实例',arguments:[{path:node.module.path,start:inst.start,end:inst.end},id]}})];
+      }
+      return targets.map(m=>this.moduleNode(m,node.ancestors,`${inst.name} : ${m.name}`,node,`${node.lineage}->inst:${inst.start}->${m.path}:${m.start}`,cacheMode,{instName:inst.name,instType:inst.type,instStart:inst.start,parentModulePath:node.module.path}));
     });
+    node._childrenMode = cacheMode; node._children = items;
+    return items;
   }
-  moduleNode(m,ancestors,label) {
+  moduleNode(m,ancestors,label,parent,lineage,cacheMode,extra={}) {
     const id=`${m.path}:${m.start}`;const cyclic=ancestors.includes(id);
-    return this.node(label,{module:m,ancestors:[...ancestors,id],children:!cyclic && m.instances.length>0,description:cyclic?'递归引用':path.basename(m.path),icon:'symbol-module',command:{command:'fpgaWorkbench.openLocation',title:'打开模块',arguments:[m]}});
+    const nodeId=`builtin:${lineage}`;
+    return this.node(label,{...extra,id:nodeId,parent,lineage,_cacheMode:cacheMode,module:m,ancestors:[...ancestors,id],children:!cyclic && m.instances.length>0,description:cyclic?'递归引用':path.basename(m.path),icon:'symbol-module',command:{command:'fpgaWorkbench.openLocation',title:'打开模块',arguments:[m,nodeId]}});
+  }
+  scheduleHierarchySync(editor=vscode.window.activeTextEditor) {
+    clearTimeout(this.selectionTimer);
+    this.selectionTimer = undefined;
+    if(this.disposed || !this.project || !editor || this.hierView?.visible === false || !this.hierView?.reveal) return;
+    const doc = editor.document;
+    if(!doc || doc.uri.scheme !== 'file' || !this.members.has(key(doc.uri.fsPath))) return;
+    const revision = this.revision;
+    this.selectionTimer = setTimeout(()=>{this.selectionTimer=undefined;if(this.isCurrent(revision))void this.syncHierarchySelection(editor);},80);
+  }
+  async walkHierPath(hierPath, revision) {
+    if(!hierPath) return undefined;
+    let nodes = await this.hierChildren(undefined);
+    let current, guard = 0;
+    while(nodes?.length && guard++ < 32) {
+      if(!this.isCurrent(revision)) return undefined;
+      const next = nodes.find(n=>n.hierPath && (hierPath === n.hierPath || hierPath.startsWith(`${n.hierPath}.`) || hierPath.startsWith(`${n.hierPath}[`)));
+      if(!next) return undefined;
+      current = next;
+      if(next.hierPath === hierPath) return current;
+      nodes = await this.hierChildren(next);
+    }
+    return current?.hierPath === hierPath ? current : undefined;
+  }
+  async findHierarchyNode(target, revision, editorText) {
+    const roots = await this.hierChildren(undefined);
+    if(!roots?.length || !this.isCurrent(revision)) return undefined;
+    const stripIdx = s => (s || '').replace(/\[.*$/,'');
+    if(roots[0].hierPath !== undefined) {
+      if(target.kind === 'instance') {
+        const paths = (await this.backend.instancePaths?.(target.moduleName)) || [];
+        if(!this.isCurrent(revision)) return undefined;
+        let candidates = paths.filter(p=>stripIdx(p.split('.').at(-1)) === target.instName);
+        if(candidates.length > 1) {
+          const parentPaths = (await this.backend.instancePaths?.(target.parentModule)) || [];
+          const scoped = candidates.filter(p=>parentPaths.some(pp=>p.startsWith(`${pp}.`) || p.startsWith(`${pp}[`)));
+          if(scoped.length) candidates = scoped;
+        }
+        const expectedLine = editorText !== undefined ? this.position(editorText,target.start).line : -1;
+        let fallbackNode;
+        for(const p of candidates) {
+          const node = await this.walkHierPath(p,revision);
+          if(!node) continue;
+          fallbackNode ||= node;
+          if(node.instLoc?.range?.start?.line === expectedLine) return node;
+        }
+        if(fallbackNode) return fallbackNode;
+        const parentPaths = (await this.backend.instancePaths?.(target.parentModule)) || [];
+        for(const pp of parentPaths) {
+          const parentNode = await this.walkHierPath(pp,revision);
+          if(!parentNode) continue;
+          const children = await this.hierChildren(parentNode);
+          const found = children.find(c=>stripIdx(c.instName) === target.instName);
+          if(found) return found;
+        }
+        const queue = [...roots];
+        let visited = 0;
+        while(queue.length && visited++ < 200) {
+          const node = queue.shift();
+          if(stripIdx(node.instName) === target.instName && (!node.parent?.declName || node.parent.declName === target.parentModule)) return node;
+          if(node.collapsibleState !== vscode.TreeItemCollapsibleState.None) queue.push(...(await this.hierChildren(node)));
+          if(!this.isCurrent(revision)) return undefined;
+        }
+        return undefined;
+      }
+      if(this.selectedHierNode?._cacheMode === this.hierCacheMode && this.selectedHierNode.declName === target.moduleName) return this.selectedHierNode;
+      const rootMatch = roots.find(r=>r.declName === target.moduleName || r.instName === target.moduleName);
+      if(rootMatch) return rootMatch;
+      const paths = (await this.backend.instancePaths?.(target.moduleName)) || [];
+      if(paths.length) {
+        const walked = await this.walkHierPath(paths[0],revision);
+        if(walked) return walked;
+      }
+      const queue = [...roots];
+      let visited = 0;
+      while(queue.length && visited++ < 200) {
+        const node = queue.shift();
+        if(node.declName === target.moduleName) return node;
+        if(node.collapsibleState !== vscode.TreeItemCollapsibleState.None) queue.push(...(await this.hierChildren(node)));
+        if(!this.isCurrent(revision)) return undefined;
+      }
+      return undefined;
+    }
+    if(target.kind === 'instance') {
+      if(this.selectedHierNode?._cacheMode === this.hierCacheMode && this.selectedHierNode.parentModulePath && key(this.selectedHierNode.parentModulePath) === key(target.parentPath) && this.selectedHierNode.instStart === target.start) {
+        return this.selectedHierNode;
+      }
+      const queue = [...roots];
+      let visited = 0;
+      while(queue.length && visited++ < 300) {
+        const node = queue.shift();
+        if(node.module && key(node.module.path) === key(target.parentPath) && node.module.start === target.parentStart) {
+          const children = await this.hierChildren(node);
+          const found = children.find(c=>c.instStart === target.start) || children.find(c=>c.instName === target.instName);
+          if(found) return found;
+        }
+        if(node.collapsibleState !== vscode.TreeItemCollapsibleState.None) queue.push(...(await this.hierChildren(node)));
+      }
+      return undefined;
+    }
+    if(this.selectedHierNode?._cacheMode === this.hierCacheMode && this.selectedHierNode.module && key(this.selectedHierNode.module.path) === key(target.path) && this.selectedHierNode.module.start === target.start) {
+      return this.selectedHierNode;
+    }
+    const queue = [...roots];
+    let visited = 0, nameFallback;
+    while(queue.length && visited++ < 300) {
+      const node = queue.shift();
+      if(node.module && key(node.module.path) === key(target.path) && node.module.start === target.start) return node;
+      if(!nameFallback && node.module?.name === target.moduleName) nameFallback = node;
+      if(node.collapsibleState !== vscode.TreeItemCollapsibleState.None) queue.push(...(await this.hierChildren(node)));
+    }
+    return nameFallback;
+  }
+  async syncHierarchySelection(editor=vscode.window.activeTextEditor) {
+    if(this.disposed || !this.project || !editor || this.hierView?.visible === false || !this.hierView?.reveal) return undefined;
+    const doc = editor.document;
+    if(!doc || doc.uri.scheme !== 'file' || !this.members.has(key(doc.uri.fsPath))) return undefined;
+    const revision = this.revision;
+    this.flushDirtyDocuments(doc);
+    const text = this.texts.get(key(doc.uri.fsPath)) ?? doc.getText();
+    const sel = editor.selection;
+    const activePos = sel?.active || sel?.start || new vscode.Position(0,0);
+    const anchorPos = sel?.anchor || sel?.end || activePos;
+    const target = this.index.hierarchyTarget(doc.uri.fsPath,this.offset(text,activePos),this.offset(text,anchorPos));
+    if(!target) return undefined;
+    const matched = await this.findHierarchyNode(target,revision,text);
+    if(!matched || !this.isCurrent(revision) || this.hierView?.visible === false) return undefined;
+    this.selectedHierNode = matched;
+    const alreadySelected = Array.isArray(this.hierView.selection)
+      ? (this.hierView.selection.length === 1 && this.hierView.selection[0]?.id === matched.id)
+      : this.lastRevealedId === matched.id;
+    if(!alreadySelected) {
+      this.lastRevealedId = matched.id;
+      try { await this.hierView.reveal(matched,{select:true,focus:false,expand:!matched.parent ? 1 : false}); }
+      catch { /* Superseded tree item during rapid navigation. */ }
+    }
+    return matched;
   }
   position(text,offset) {const before=text.slice(0,offset);const line=before.split('\n').length-1;return new vscode.Position(line,offset-(before.lastIndexOf('\n')+1));}
   offset(text,position) {
@@ -405,7 +637,7 @@ class Workbench {
     if(options.localOnly)return this.definitionTargets(doc,pos,token,options);
     if(doc.uri.scheme!=='file' || !this.members.has(key(doc.uri.fsPath)) || token?.isCancellationRequested)return [];
     const revision=this.revision,text=doc.getText();
-    this.changedDocument(doc);
+    this.flushDirtyDocuments(doc);
     const sources=this.sourceRevision;
     const current=()=>this.isCurrent(revision) && this.sourceRevision===sources && !token?.isCancellationRequested && doc.getText()===text;
     const locals=await this.definitionTargets(doc,pos,token);
@@ -477,7 +709,7 @@ class Workbench {
     if(!this.members.has(key(doc.uri.fsPath)) || token?.isCancellationRequested) return [];
     const revision=this.revision;
     const text=doc.getText();
-    this.changedDocument(doc);
+    this.flushDirtyDocuments(doc);
     const sources=this.sourceRevision;
     const current=()=>this.isCurrent(revision) && this.sourceRevision===sources && !token?.isCancellationRequested && doc.getText()===text;
     const parents=this.index.parentConnections(doc.uri.fsPath,doc.offsetAt(pos));
@@ -502,7 +734,7 @@ class Workbench {
   async peekDefinitions(doc,pos,token) {
     if(doc.uri.scheme!=='file' || !this.members.has(key(doc.uri.fsPath)) || token?.isCancellationRequested)return [];
     const revision=this.revision,text=doc.getText();
-    this.changedDocument(doc);
+    this.flushDirtyDocuments(doc);
     const sources=this.sourceRevision;
     const current=()=>this.isCurrent(revision) && this.sourceRevision===sources && !token?.isCancellationRequested && doc.getText()===text;
     const locals=await this.definitionTargets(doc,pos,token,{localOnly:true});
@@ -536,7 +768,7 @@ class Workbench {
   async references(doc,pos,includeDeclaration,token) {
     if(!this.members.has(key(doc.uri.fsPath))) return [];
     const revision=this.revision;
-    this.changedDocument(doc);
+    this.flushDirtyDocuments(doc);
     if(this.backend.running) {
       try {const results=await this.backend.references(doc,pos,includeDeclaration,token);return this.isCurrent(revision) ? results || [] : [];}
       catch(e) {if(this.isCurrent(revision))this.output.appendLine(`引用查询：${e.message}`);return [];}
@@ -545,7 +777,7 @@ class Workbench {
   }
   symbols(doc,token) {
     if(this.disposed || doc.uri.scheme!=='file' || !this.members.has(key(doc.uri.fsPath)) || token?.isCancellationRequested) return [];
-    this.changedDocument(doc);
+    this.flushDirtyDocuments(doc);
     const text=this.texts.get(key(doc.uri.fsPath));
     // Native Sticky Scroll needs the whole module body, while symbol selection
     // should still reveal only its name. No editor setting is changed here.
@@ -577,9 +809,14 @@ class Workbench {
     if(page)return vscode.window.showTextDocument(page.uri,{selection:page.range,preview:true});
     await vscode.commands.executeCommand('editor.action.showReferences',editor.document.uri,editor.selection.active,this.previewLocations(refs));
   }
-  async openLocation(loc) {
+  async openLocation(loc, hierId) {
+    if(hierId) this.lastRevealedId = hierId;
     const target=this.location(loc);
     await vscode.window.showTextDocument(target.uri,{selection:target.range,preview:true});
+  }
+  async openHierarchy(hierPath, hierId) {
+    if(hierId) this.lastRevealedId = hierId;
+    await this.backend.showHierarchy(hierPath);
   }
   async chooseFileset() {
     if(!this.project) return this.selectProject();
@@ -590,8 +827,9 @@ class Workbench {
     if(this.isCurrent(revision))await this.refresh();
   }
   async chooseTop() {
+    this.flushDirtyDocuments();
     const revision=this.revision;
-    const picked=await vscode.window.showQuickPick([{label:'使用 XPR 顶层',value:undefined},...this.index.modules().map(m=>({label:m.name,description:path.basename(m.path),value:m.name}))],{title:'选择顶层模块'});
+    const picked=await vscode.window.showQuickPick([{label:'使用工程默认顶层',value:undefined},...this.index.modules().map(m=>({label:m.name,description:path.basename(m.path),value:m.name}))],{title:'选择顶层模块'});
     if(!picked || !this.isCurrent(revision))return;this.top=picked.value;await this.context.workspaceState.update('top',this.top);if(this.isCurrent(revision))await this.refresh();
   }
   async exportFilelist() {
@@ -630,7 +868,8 @@ class Workbench {
     this.highlighting?.dispose();
     const lintingStopped = this.linting?.dispose();
     this.lintView?.dispose();
-    clearTimeout(this.refreshTimer);clearTimeout(this.treeTimer);this.clearWatchers();
+    this.clearTimers();this.clearWatchers();
+    this.dirtyDocs.clear();
     this.disposeDocumentSymbols();
     return this.enqueue(async()=>{await Promise.all([this.backend.stop(),lintingStopped]);});
   }
@@ -654,7 +893,7 @@ function activate(context) {
   const linting = new HdlLinter(vscode, () => app.project, {state: context.workspaceState,onDidChange:snapshot=>lintView.update(snapshot)});
   app.linting = linting;
   context.subscriptions.push(linting,lintView);
-  const commands={selectProjectType:t=>app.selectProjectType(t),selectProject:u=>app.selectProject(u),switchProject:u=>app.selectProject(typeof u === 'string' || (u?.scheme === 'file' && typeof u.fsPath === 'string') ? u : undefined),closeProject:()=>app.closeProject(),refresh:()=>app.refresh(),selectFileset:()=>app.chooseFileset(),selectTop:()=>app.chooseTop(),exportFilelist:()=>app.exportFilelist(),openFilelistSkill:()=>app.openFilelistSkill(),projectInfo:()=>app.info(),peekDefinition:()=>app.navigate(true),gotoDefinition:()=>app.navigate(false),parentConnections:()=>app.findReferences(),openLocation:l=>app.openLocation(l),openHierarchy:p=>app.backend.showHierarchy(p)};
+  const commands={selectProject:u=>app.selectProject(u),switchProject:u=>app.selectProject(typeof u === 'string' || (u?.scheme === 'file' && typeof u.fsPath === 'string') ? u : undefined),closeProject:()=>app.closeProject(),refresh:()=>app.refresh(),selectFileset:()=>app.chooseFileset(),selectTop:()=>app.chooseTop(),exportFilelist:()=>app.exportFilelist(),openFilelistSkill:()=>app.openFilelistSkill(),projectInfo:()=>app.info(),peekDefinition:()=>app.navigate(true),gotoDefinition:()=>app.navigate(false),parentConnections:()=>app.findReferences(),openLocation:(l,id)=>app.openLocation(l,id),openHierarchy:(p,id)=>app.openHierarchy(p,id)};
   for(const [name,handler] of Object.entries(commands)) context.subscriptions.push(vscode.commands.registerCommand(`fpgaWorkbench.${name}`,async(...args)=>{try{return await handler(...args);}catch(e){app.report(e);}}));
   context.subscriptions.push(vscode.commands.registerCommand('fpgaWorkbench.runLint',()=>linting.run()),
     vscode.commands.registerCommand('fpgaWorkbench.showLintOutput',()=>linting.showOutput()),

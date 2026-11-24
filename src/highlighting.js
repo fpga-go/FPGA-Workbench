@@ -97,6 +97,38 @@ class HdlHighlighter {
     this.disposed = false;
     this.delay = options.delay ?? 60;
     this.onError = options.onError || (() => {});
+    this._createTokenizer = () => (options.createTokenizer || createTokenizer)(extensionPath);
+    this.ready = undefined;
+    this.types = new Map();
+    this.selectedCommentType = undefined;
+    this.selectedCommentInactiveType = undefined;
+    if (this.mode !== 'theme') this.ensureDecorations();
+    this.subscriptions = [
+      vscode.window.onDidChangeVisibleTextEditors(() => { if (this.mode !== 'theme') this.refreshVisible(); }),
+      vscode.window.onDidChangeActiveTextEditor(() => { if (this.mode !== 'theme') this.refreshVisible(); }),
+      vscode.window.onDidChangeWindowState(() => { if (this.mode !== 'theme') this.refreshVisible(); }),
+      vscode.window.onDidChangeTextEditorVisibleRanges(event => {
+        if (this.mode !== 'theme' && supported(event.textEditor.document)) this.schedule(event.textEditor.document, 0);
+      }),
+      vscode.window.onDidChangeActiveColorTheme(() => { if (this.mode !== 'theme') this.refreshVisible(true); }),
+      vscode.window.onDidChangeTextEditorSelection(event => { if (this.mode !== 'theme') this.selection(event.textEditor); }),
+      vscode.workspace.onDidOpenTextDocument(() => { if (this.mode !== 'theme') this.refreshVisible(); }),
+      vscode.workspace.onDidCloseTextDocument(document => { if (this.mode !== 'theme' || this.entries.size) this.close(document); }),
+      vscode.workspace.onDidChangeTextDocument(event => { if (this.mode !== 'theme') this.change(event); }),
+      vscode.workspace.onDidChangeConfiguration(event => {
+        if (!['mode', 'lightColors', 'darkColors'].some(key => event.affectsConfiguration('fpgaWorkbench.highlighting.' + key))) return;
+        this.reloadConfiguration();
+      })
+    ];
+    if (this.mode !== 'theme') {
+      void this.ensureReady();
+      this.refreshVisible();
+    }
+  }
+
+  ensureDecorations() {
+    if (this.disposed || this.types.size) return;
+    const vscode = this.vscode;
     this.types = new Map(CATEGORIES.map(category => [category,
       vscode.window.createTextEditorDecorationType({
         color: this.palettes.dark[category],
@@ -117,34 +149,23 @@ class HdlHighlighter {
       dark: { color: INACTIVE_SELECTED_COMMENT_COLORS.dark },
       rangeBehavior: vscode.DecorationRangeBehavior.ClosedClosed
     });
-    this.subscriptions = [
-      vscode.window.onDidChangeVisibleTextEditors(() => this.refreshVisible()),
-      vscode.window.onDidChangeActiveTextEditor(() => this.refreshVisible()),
-      vscode.window.onDidChangeWindowState(() => this.refreshVisible()),
-      vscode.window.onDidChangeTextEditorVisibleRanges(event => {
-        if (supported(event.textEditor.document)) this.schedule(event.textEditor.document, 0);
-      }),
-      vscode.window.onDidChangeActiveColorTheme(() => this.refreshVisible(true)),
-      vscode.window.onDidChangeTextEditorSelection(event => this.selection(event.textEditor)),
-      vscode.workspace.onDidOpenTextDocument(() => this.refreshVisible()),
-      vscode.workspace.onDidCloseTextDocument(document => this.close(document)),
-      vscode.workspace.onDidChangeTextDocument(event => this.change(event)),
-      vscode.workspace.onDidChangeConfiguration(event => {
-        if (!['mode', 'lightColors', 'darkColors'].some(key => event.affectsConfiguration('fpgaWorkbench.highlighting.' + key))) return;
-        this.reloadConfiguration();
-      })
-    ];
-    this.ready = Promise.resolve().then(() => (options.createTokenizer || createTokenizer)(extensionPath))
-      .then(tokenizer => {
-        if (this.disposed) { tokenizer.dispose(); return undefined; }
-        this.tokenizer = tokenizer;
-        return tokenizer;
-      }).catch(error => {
-        this.initializationError = error;
-        this.reportInitializationError();
-        return undefined;
-      });
-    this.refreshVisible();
+  }
+
+  ensureReady() {
+    if (this.disposed || this.mode === 'theme') return Promise.resolve(undefined);
+    if (!this.ready) {
+      this.ready = Promise.resolve().then(() => this._createTokenizer())
+        .then(tokenizer => {
+          if (this.disposed) { tokenizer?.dispose(); return undefined; }
+          this.tokenizer = tokenizer;
+          return tokenizer;
+        }).catch(error => {
+          this.initializationError = error;
+          this.reportInitializationError();
+          return undefined;
+        });
+    }
+    return this.ready;
   }
 
   readMode() {
@@ -154,19 +175,25 @@ class HdlHighlighter {
 
   reloadConfiguration() {
     const vscode = this.vscode;
-  this.mode = this.readMode();
-  const palettes = this.readPalettes();
-  if (JSON.stringify(palettes) !== JSON.stringify(this.palettes)) {
-    for (const editor of this.visibleEditors) this.clearEditor(editor);
-    for (const type of this.types.values()) type.dispose();
-    this.palettes = palettes;
-    this.types = new Map(CATEGORIES.map(category => [category, vscode.window.createTextEditorDecorationType({
-      color: palettes.dark[category], light: {color: palettes.light[category]}, dark: {color: palettes.dark[category]},
-      rangeBehavior: vscode.DecorationRangeBehavior.ClosedClosed
-    })]));
-  }
-  this.reportInitializationError();
-  this.refreshVisible(true);
+    this.mode = this.readMode();
+    if (this.mode !== 'theme') {
+      this.ensureDecorations();
+      void this.ensureReady();
+    }
+    const palettes = this.readPalettes();
+    if (this.types.size && JSON.stringify(palettes) !== JSON.stringify(this.palettes)) {
+      for (const editor of this.visibleEditors) this.clearEditor(editor);
+      for (const type of this.types.values()) type.dispose();
+      this.palettes = palettes;
+      this.types = new Map(CATEGORIES.map(category => [category, vscode.window.createTextEditorDecorationType({
+        color: palettes.dark[category], light: {color: palettes.light[category]}, dark: {color: palettes.dark[category]},
+        rangeBehavior: vscode.DecorationRangeBehavior.ClosedClosed
+      })]));
+    } else {
+      this.palettes = palettes;
+    }
+    this.reportInitializationError();
+    this.refreshVisible(true);
   }
 
   async selectScheme() {
@@ -231,7 +258,8 @@ class HdlHighlighter {
 
   clearEditor(editor) {
     this.appliedSelections.delete(editor);
-    for (const type of [...this.types.values(), this.selectedCommentType, this.selectedCommentInactiveType]) {
+    if (!this.types.size) return;
+    for (const type of [...this.types.values(), this.selectedCommentType, this.selectedCommentInactiveType].filter(Boolean)) {
       try { editor.setDecorations(type, []); } catch { /* Editor may have closed. */ }
     }
   }
@@ -351,7 +379,8 @@ class HdlHighlighter {
     const key = documentKey(document);
     const current = () => !this.disposed && this.shouldPaint(document) &&
       this.pending.get(key) === ticket && this.editors(document).length > 0;
-    const tokenizer = await this.ready;
+    this.ensureDecorations();
+    const tokenizer = await this.ensureReady();
     if (!tokenizer || !current()) return;
     const language = document.languageId;
     const version = document.version;
@@ -423,8 +452,8 @@ class HdlHighlighter {
     for (const subscription of this.subscriptions) subscription.dispose();
     for (const key of this.pending.keys()) this.cancel(key);
     for (const type of this.types.values()) type.dispose();
-    this.selectedCommentType.dispose();
-    this.selectedCommentInactiveType.dispose();
+    this.selectedCommentType?.dispose();
+    this.selectedCommentInactiveType?.dispose();
     this.entries.clear();
     this.errors.clear();
     this.visibleEditors.clear();

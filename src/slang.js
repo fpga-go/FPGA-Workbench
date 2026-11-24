@@ -219,6 +219,8 @@ class SlangBackend {
     this.status = 'idle';
     this.diagnostics = new Map();
     this.documents = new Map();
+    this.pendingDocs = new Map();
+    this.syncTimer = undefined;
     this.subscriptions = [];
     this.queue = Promise.resolve();
     this.scopeCache = new Map();
@@ -226,7 +228,7 @@ class SlangBackend {
 
   log(message) { this.output?.appendLine(`[slang] ${message}`); }
 
-  async start({ context, project, output, onChange }) {
+  async start({ context, project, output, onChange, texts }) {
     await this.stop();
     this.status = 'starting';
     const vscode = this.vscode = require('vscode');
@@ -288,12 +290,19 @@ class SlangBackend {
       this.commands = new Set(initialized.capabilities?.executeCommandProvider?.commands || []);
       client.notify('initialized', {});
       this.running = true;
+      const openByKey = new Map();
+      for (const doc of vscode.workspace.textDocuments) {
+        if (doc.uri.scheme === 'file') openByKey.set(canonical(doc.uri.fsPath), doc);
+      }
       // didOpen provides decoded text for legacy GBK files without rewriting them.
-      // All files also remain available when the server has no directory index.
+      // Reuse texts already decoded by Workbench.load() to avoid duplicate disk I/O.
       for (const file of project.sourceFiles) {
-        const open = vscode.workspace.textDocuments.find(doc => canonical(doc.uri.fsPath) === canonical(file));
+        const fileKey = canonical(file);
+        const open = openByKey.get(fileKey);
         if (open) this.syncDocument(open);
-        else {
+        else if (texts?.has(fileKey)) {
+          this.syncText(vscode.Uri.file(file).toString(), texts.get(fileKey));
+        } else {
           const decoded = decodeSource(await fs.readFile(file), this.encoding);
           this.syncText(vscode.Uri.file(file).toString(), decoded.text);
           if (decoded.encoding !== 'utf-8') this.log(`已按 ${decoded.encoding} 解码：${file}`);
@@ -308,10 +317,11 @@ class SlangBackend {
         if (this.belongs(document)) event(() => this.syncDocument(document));
       }));
       this.subscriptions.push(vscode.workspace.onDidChangeTextDocument(change => {
-        if (this.belongs(change.document)) event(() => this.syncDocument(change.document));
+        if (this.belongs(change.document)) this.scheduleSync(change.document, event);
       }));
       this.subscriptions.push(vscode.workspace.onDidSaveTextDocument(document => {
         if (this.belongs(document)) event(() => {
+          this.flushPendingDocs();
           this.syncDocument(document);
           this.client.notify('textDocument/didSave', { textDocument: { uri: document.uri.toString() }, text: document.getText() });
           this.onChange?.();
@@ -319,6 +329,7 @@ class SlangBackend {
       }));
       this.subscriptions.push(vscode.workspace.onDidCloseTextDocument(document => {
         if (this.belongs(document)) event(async () => {
+          this.pendingDocs.delete(document.uri.toString());
           // Closing a dirty editor can discard its unsaved text. Keep the server's
           // decoded document open, but restore the actual disk contents.
           const decoded = decodeSource(await fs.readFile(document.uri.fsPath), this.encoding);
@@ -355,7 +366,30 @@ class SlangBackend {
     this.designDirty = uri;
   }
 
-  syncDocument(document) { if (this.belongs(document)) this.syncText(document.uri.toString(), document.getText()); }
+  syncDocument(document) {
+    if (!this.belongs(document)) return;
+    this.pendingDocs.delete(document.uri.toString());
+    this.syncText(document.uri.toString(), document.getText());
+  }
+
+  scheduleSync(document, event) {
+    this.pendingDocs.set(document.uri.toString(), document);
+    clearTimeout(this.syncTimer);
+    this.syncTimer = setTimeout(() => {
+      this.syncTimer = undefined;
+      event(() => this.flushPendingDocs());
+    }, 250);
+  }
+
+  flushPendingDocs() {
+    clearTimeout(this.syncTimer);
+    this.syncTimer = undefined;
+    if (!this.pendingDocs.size) return;
+    const docs = [...this.pendingDocs.values()];
+    this.pendingDocs.clear();
+    for (const doc of docs) this.syncDocument(doc);
+  }
+
   range(range) { return new this.vscode.Range(range.start.line, range.start.character, range.end.line, range.end.character); }
   locations(result) {
     if (!result) return null;
@@ -370,6 +404,7 @@ class SlangBackend {
     if (!this.running || !this.belongs(document)) return null;
     try {
       await this.queue;
+      this.flushPendingDocs();
       this.syncDocument(document);
       const text = document.getText();
       const result = await this.client.request('textDocument/definition', {
@@ -391,6 +426,7 @@ class SlangBackend {
     if (!this.running || !this.belongs(document)) return null;
     try {
       await this.queue;
+      this.flushPendingDocs();
       this.syncDocument(document);
       return this.locations(await this.client.request('textDocument/references', {
         textDocument: { uri: document.uri.toString() }, position: { line: position.line, character: position.character },
@@ -403,6 +439,7 @@ class SlangBackend {
     try {
       await this.queue;
       if (token?.isCancellationRequested || !this.commands.has('slang.getInstancesOfModule') || !this.commands.has('slang.getScope')) return [];
+      this.flushPendingDocs();
       this.syncDocument(document);
       const text = document.getText();
       await this.flushDesign();
@@ -425,6 +462,7 @@ class SlangBackend {
     return this.scopeCache.get(key);
   }
   async flushDesign() {
+    this.flushPendingDocs();
     if (!this.designDirty) return;
     const uri = this.designDirty;
     this.designDirty = undefined;
@@ -446,6 +484,15 @@ class SlangBackend {
     try { await this.queue; await this.flushDesign(); return await this.cachedExecute('slang.getScope', [scope]) || []; }
     catch (error) { this.log(error.message); return []; }
   }
+  async instancePaths(moduleName) {
+    if (!this.running || !moduleName || !this.commands?.has('slang.getInstancesOfModule')) return [];
+    try {
+      await this.queue;
+      await this.flushDesign();
+      const items = await this.cachedExecute('slang.getInstancesOfModule', [moduleName]);
+      return (items || []).map(item => item.instPath).filter(Boolean);
+    } catch (error) { this.log(error.message); return []; }
+  }
   async showHierarchy(hierPath) {
     if (!this.running || !this.commands.has('slang.showHierLocation')) return;
     try { await this.execute('slang.showHierLocation', [{ hierPath, takeFocus: true }]); }
@@ -463,6 +510,7 @@ class SlangBackend {
         this.client.notify('textDocument/didSave', { textDocument: { uri: uri.toString() }, text: decoded.text });
       }
       if (type === 3) {
+        this.pendingDocs.delete(uri.toString());
         this.client.notify('textDocument/didClose', { textDocument: { uri: uri.toString() } });
         this.documents.delete(uri.toString());
       }
@@ -475,6 +523,9 @@ class SlangBackend {
   async stop() {
     this.running = false;
     this.status = 'stopped';
+    clearTimeout(this.syncTimer);
+    this.syncTimer = undefined;
+    this.pendingDocs.clear();
     for (const subscription of this.subscriptions) subscription.dispose();
     this.subscriptions = [];
     await this.queue.catch(() => {});

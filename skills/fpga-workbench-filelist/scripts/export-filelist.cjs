@@ -2318,10 +2318,18 @@ var require_indexer = __commonJS({
         this._modules = [];
         this._byName = /* @__PURE__ */ new Map();
       }
+      _publicModule({ file, scopes, tokenScopes, excluded, portAliases, ...mod }) {
+        return { ...mod };
+      }
       update(filePath, text) {
-        this._files.set(fileKey(filePath), parseFile(filePath, text));
+        const parsed = parseFile(filePath, text);
+        this._files.set(fileKey(filePath), parsed);
         this._rebuild();
-        return this.modules().filter((mod) => mod.path === filePath);
+        return parsed.modules.map((mod) => this._publicModule(mod));
+      }
+      updateBatch(entries) {
+        for (const [filePath, text] of entries) this._files.set(fileKey(filePath), parseFile(filePath, text));
+        this._rebuild();
       }
       remove(filePath) {
         this._files.delete(fileKey(filePath));
@@ -2340,7 +2348,39 @@ var require_indexer = __commonJS({
         }
       }
       modules() {
-        return this._modules.map(({ file, scopes, tokenScopes, excluded, portAliases, ...mod }) => ({ ...mod }));
+        return this._modules.map((mod) => this._publicModule(mod));
+      }
+      hierarchyTarget(filePath, offset, endOffset = offset) {
+        const file = this._files.get(fileKey(filePath));
+        if (!file || !file.modules.length) return void 0;
+        const from = Math.min(offset, endOffset);
+        const to = Math.max(offset, endOffset);
+        const mod = file.modules.find((item) => from >= item.bodyStart && from <= item.bodyEnd) || file.modules.find((item) => item.bodyStart < to && item.bodyEnd > from) || (file.modules.length === 1 ? file.modules[0] : void 0);
+        if (!mod) return void 0;
+        const inst = from === to ? mod.instances.find((item) => from >= item.bodyStart && from <= item.bodyEnd) : mod.instances.find((item) => item.typeStart < to && item.end > from) || mod.instances.find((item) => item.bodyStart < to && item.bodyEnd > from);
+        if (inst) {
+          return {
+            kind: "instance",
+            parentModule: mod.name,
+            parentPath: mod.path,
+            parentStart: mod.start,
+            parentBodyStart: mod.bodyStart,
+            instName: inst.name,
+            moduleName: inst.type,
+            start: inst.start,
+            end: inst.end,
+            typeStart: inst.typeStart,
+            typeEnd: inst.typeEnd
+          };
+        }
+        return {
+          kind: "module",
+          moduleName: mod.name,
+          path: mod.path,
+          start: mod.start,
+          end: mod.end,
+          bodyStart: mod.bodyStart
+        };
       }
       _moduleLocations(name) {
         return (this._byName.get(name) || []).map((mod) => location(mod.path, { start: mod.start, end: mod.end, value: mod.name }, "module"));

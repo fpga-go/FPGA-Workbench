@@ -31,7 +31,7 @@ function harness(t) {
   const h = {
     state: new Map(), contexts: new Map(), commands: new Map(), watchers: [], timers: new Map(),
     loadCalls: [], starts: [], backendEvents: [], logs: [], errors: [], timerId: 0, filelistCalls: [], executions: [],
-    symbolRegistrations: [], symbolEvents: [], lintEvents: [],
+    symbolRegistrations: [], symbolEvents: [], lintEvents: [], reveals: [], backendChanges: [],
   };
   const disposable = () => ({ disposed: false, dispose() { this.disposed = true; } });
   const uri = file => ({ scheme: 'file', fsPath: path.resolve(file), toString() { return pathToFileURL(this.fsPath).href; } });
@@ -57,10 +57,12 @@ function harness(t) {
   h.parentConnections = async () => [];
   h.reference = async () => [];
   h.hierarchy = async () => [];
+  h.instancePaths = async () => [];
 
   class Backend {
     constructor() { this.running = false; this.status = 'idle'; this.diagnosticsCounts = { errors: 0, warnings: 0 }; }
     async start(options) {
+      h.lastStartOptions = options;
       h.starts.push(options.project.name);
       h.backendEvents.push(`start:${options.project.name}`);
       this.onChange = options.onChange;
@@ -74,12 +76,13 @@ function harness(t) {
     parentConnections(...args) { return h.parentConnections(...args); }
     references(...args) { return h.reference(...args); }
     hierarchy(...args) { return h.hierarchy(...args); }
-    async changed() {}
+    instancePaths(...args) { return h.instancePaths(...args); }
+    async changed(...args) { h.backendChanges.push(args); }
     async showHierarchy() {}
   }
 
   const workspaceRoot = uri(path.resolve('synthetic-lifecycle', 'workspace'));
-  const events = Object.fromEntries(['change', 'open', 'close', 'configuration', 'folders', 'activeEditor'].map(name => [name, new Emitter()]));
+  const events = Object.fromEntries(['change', 'open', 'close', 'configuration', 'folders', 'activeEditor', 'selection', 'hierVisibility'].map(name => [name, new Emitter()]));
   const vscode = {
     Uri: { file: uri, parse: value => {const parsed=new URL(value); return {scheme:parsed.protocol.slice(0,-1), path:parsed.pathname, toString:()=>value};} }, EventEmitter: Emitter,
     TreeItem: class { constructor(label, collapsibleState) { this.label = label; this.collapsibleState = collapsibleState; } },
@@ -100,9 +103,22 @@ function harness(t) {
     TreeItemCollapsibleState: { None: 0, Collapsed: 1 }, StatusBarAlignment: { Left: 1 },
     window: {
       onDidChangeActiveTextEditor: events.activeEditor.event,
+      onDidChangeTextEditorSelection: events.selection.event,
       createOutputChannel: () => ({ ...disposable(), appendLine: line => h.logs.push(line), show() {} }),
       createStatusBarItem: () => ({ ...disposable(), show() {} }),
-      createTreeView: () => disposable(),
+      createTreeView: (id, options) => {
+        const view = {
+          ...disposable(), id, options, visible: true, selection: [],
+          onDidChangeVisibility: events.hierVisibility.event,
+          reveal: async (item, revealOptions) => {
+            if (revealOptions?.select !== false) view.selection = [item];
+            h.reveals.push({ item, options: revealOptions });
+          },
+        };
+        if (id === 'fpgaWorkbench.hierarchy') h.hierView = view;
+        else if (id === 'fpgaWorkbench.files') h.fileView = view;
+        return view;
+      },
       withProgress: async (_options, action) => action(),
       showOpenDialog: (...args) => h.openDialog(...args),
       showQuickPick: async () => undefined,
@@ -1120,19 +1136,137 @@ test('summary parameters include named instance overrides and keep native mode a
   const manifest=require('../package.json');assert.equal(manifest.contributes.configuration.properties['fpgaWorkbench.navigation.candidateList'].default,'native');
 });
 
-test('project type switch toggles between Vivado (Xilinx) and Diamond (Lattice) and updates picker filter priority', timeout, async t => {
-  const h=harness(t);
-  assert.equal(h.contexts.get('fpgaWorkbench.projectType'),'vivado');
+test('single-step adaptive project picker accepts .xpr, .lpf, .ldf and arbitrary filelists without type pre-selection', timeout, async t => {
+  const manifest = require('../package.json');
+  assert.ok(!manifest.activationEvents.includes('onStartupFinished'), 'extension must not activate eagerly on unrelated workspaces');
+  assert.ok(!manifest.contributes.commands.some(cmd => cmd.command === 'fpgaWorkbench.selectProjectType'));
+  assert.equal(manifest.contributes.configuration.properties['fpgaWorkbench.projectType'], undefined);
+  assert.equal(manifest.contributes.viewsWelcome.length, 1);
+  assert.equal(manifest.contributes.viewsWelcome[0].when, '!fpgaWorkbench.hasProject');
+
+  const h = harness(t);
+  assert.equal(h.commands.has('fpgaWorkbench.selectProjectType'), false);
   let dialogOptions;
-  h.openDialog=async options=>{dialogOptions=options;return undefined;};
+  const chosenLpf = path.resolve('synthetic-lifecycle', 'lat', 'top.lpf');
+  h.load = async file => ({
+    path: file, root: path.dirname(file), name: path.basename(file, path.extname(file)),
+    projectType: file.endsWith('.lpf') ? 'lattice' : 'vivado',
+    top: 'lat_top', warnings: [], sourceFiles: [h.source('A')], includeDirs: [], defines: [],
+    filesets: [{ name: 'impl1', type: 'DesignSrcs' }],
+    files: [{ path: h.source('A'), fileset: 'impl1', exists: true, enabled: true }],
+  });
+  h.openDialog = async options => { dialogOptions = options; return [h.vscode.Uri.file(chosenLpf)]; };
   await h.app.selectProject();
-  assert.match(dialogOptions.title,/Vivado \(Xilinx\)/);
-  assert.equal(Object.keys(dialogOptions.filters)[0],'Vivado (Xilinx) 工程');
-  h.vscode.window.showQuickPick=async items=>items.find(item=>item.value==='lattice');
-  await h.commands.get('fpgaWorkbench.selectProjectType')();
-  assert.equal(h.contexts.get('fpgaWorkbench.projectType'),'lattice');
-  assert.equal(h.state.get('projectType'),'lattice');
-  await h.app.selectProject();
-  assert.match(dialogOptions.title,/Diamond \(Lattice\)/);
-  assert.equal(Object.keys(dialogOptions.filters)[0],'Diamond (Lattice) 工程');
+  const filterEntries = Object.entries(dialogOptions.filters);
+  assert.deepEqual(Array.from(filterEntries[0][1]), ['xpr', 'lpf', 'ldf', 'f']);
+  assert.ok(filterEntries.some(([, exts]) => Array.from(exts).includes('*')));
+  assert.equal(h.app.project.path, chosenLpf);
+  assert.equal(h.app.project.projectType, 'lattice');
+  assert.equal(h.lastStartOptions.texts?.size, 1, 'decoded source texts are passed to backend without duplicate disk I/O');
+});
+
+test('saving a member HDL file updates backend incrementally without restarting slang-server while config edits reload', timeout, async t => {
+  const h = harness(t);
+  await h.app.selectProject(h.xpr('A'));
+  assert.equal(h.starts.length, 1);
+  const watcher = h.liveWatchers()[0];
+  assert.ok(watcher);
+  const sourceUri = h.vscode.Uri.file(h.source('A'));
+  const xprUri = h.vscode.Uri.file(h.xpr('A'));
+  const revBefore = h.app.sourceRevision;
+  watcher.change.fire(sourceUri);
+  assert.ok(h.app.sourceRevision > revBefore);
+  assert.equal(h.backendChanges.length, 1);
+  assert.equal(h.backendChanges[0][1], 2);
+  assert.equal(h.app.refreshTimer, undefined, 'saving an HDL member file must not schedule a full project restart');
+  assert.equal(h.starts.length, 1);
+
+  watcher.change.fire(xprUri);
+  assert.notEqual(h.app.refreshTimer, undefined, 'modifying the project file schedules a full project reload');
+});
+
+test('selecting an instantiated module in editor reveals and highlights the corresponding node in hierarchy view for builtin and semantic modes', timeout, async t => {
+  const h = harness(t);
+  reverseNavigationFixture(h);
+  await h.app.selectProject(h.xpr('A'));
+  const getParent = h.hierView.options.treeDataProvider.getParent;
+  assert.equal(typeof getParent, 'function');
+
+  const flushSelectionTimer = async () => {
+    for (const [id, entry] of [...h.timers.entries()]) {
+      if (entry.delay === 80) { h.timers.delete(id); entry.callback(); }
+    }
+    await new Promise(resolve => setImmediate(resolve));
+  };
+
+  // 1. Builtin mode: selecting second(.clk(other_clk)) in A_top reveals 'second : child' with select:true, focus:false
+  h.app.backend.running = false;
+  h.reveals.length = 0;
+  h.hierView.selection = [];
+  const topDoc = h.document('A');
+  const topText = topDoc.getText();
+  const secondOffset = topText.indexOf('second(.clk');
+  const secondPos = h.app.position(topText, secondOffset);
+  const editor = { document: topDoc, selection: { active: secondPos, anchor: secondPos, start: secondPos, end: secondPos } };
+  h.vscode.window.activeTextEditor = editor;
+  h.events.selection.fire({ textEditor: editor });
+  await flushSelectionTimer();
+
+  assert.equal(h.reveals.length, 1);
+  assert.equal(h.reveals[0].item.label, 'second : child');
+  assert.deepEqual({ ...h.reveals[0].options }, { select: true, focus: false, expand: false });
+  assert.equal(getParent(h.reveals[0].item).label, 'A_top');
+  assert.equal(getParent(getParent(h.reveals[0].item)), undefined);
+
+  // Jumping into child.v keeps 'second : child' selected rather than jumping back to 'first : child'
+  const childDoc = h.document('child');
+  const childPos = h.app.position(childDoc.getText(), childDoc.getText().indexOf('child'));
+  const childEditor = { document: childDoc, selection: { active: childPos, anchor: childPos } };
+  h.vscode.window.activeTextEditor = childEditor;
+  h.events.activeEditor.fire(childEditor);
+  await flushSelectionTimer();
+  assert.equal(h.hierView.selection[0].label, 'second : child');
+
+  // Hidden hierarchy view never calls reveal until made visible again
+  h.hierView.visible = false;
+  h.reveals.length = 0;
+  const firstPos = h.app.position(topText, topText.indexOf('first(.clk'));
+  editor.selection = { active: firstPos, anchor: firstPos };
+  h.vscode.window.activeTextEditor = editor;
+  h.events.selection.fire({ textEditor: editor });
+  await flushSelectionTimer();
+  assert.equal(h.reveals.length, 0, 'hidden TreeView must not force sidebar open');
+
+  h.hierView.visible = true;
+  h.events.hierVisibility.fire({ visible: true });
+  await flushSelectionTimer();
+  assert.equal(h.reveals.length, 1);
+  assert.equal(h.reveals[0].item.label, 'first : child');
+
+  // 2. Semantic (slang) mode: walks nested generate/scope instance path and highlights exact instance
+  h.app.backend.running = true;
+  h.app.fireTreeChange();
+  h.instancePaths = async modName => modName === 'child' ? ['A_top.gen_blk[0].first', 'A_top.gen_blk[0].second'] : ['A_top'];
+  h.hierarchy = async scope => {
+    if (scope === '') return [{ kind: 'Instance', instName: 'A_top', declName: 'A_top' }];
+    if (scope === 'A_top') return [{ kind: 'GenerateBlockArray', instName: 'gen_blk', declName: 'gen_blk' }];
+    if (scope === 'A_top.gen_blk') return [{ kind: 'GenerateBlock', instName: '[0]', declName: 'gen_blk' }];
+    if (scope === 'A_top.gen_blk[0]') return [
+      { kind: 'Instance', instName: 'first', declName: 'child', hasChildren: false },
+      { kind: 'Instance', instName: 'second', declName: 'child', hasChildren: false },
+    ];
+    return [];
+  };
+  h.reveals.length = 0;
+  h.hierView.selection = [];
+  editor.selection = { active: secondPos, anchor: secondPos };
+  h.events.selection.fire({ textEditor: editor });
+  await flushSelectionTimer();
+
+  assert.equal(h.reveals.length, 1);
+  assert.equal(h.reveals[0].item.hierPath, 'A_top.gen_blk[0].second');
+  assert.deepEqual({ ...h.reveals[0].options }, { select: true, focus: false, expand: false });
+  assert.equal(getParent(h.reveals[0].item).hierPath, 'A_top.gen_blk[0]');
+  assert.equal(getParent(getParent(h.reveals[0].item)).hierPath, 'A_top.gen_blk');
+  assert.equal(getParent(getParent(getParent(h.reveals[0].item))).hierPath, 'A_top');
 });

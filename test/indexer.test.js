@@ -625,3 +625,26 @@ test('local declaration rows show only the selected symbol', () => {
  const target=owner.symbols.find(item=>item.name==='W');
  assert.equal(index.candidateSummaries('child.v',target.start,target.end)[0].label,'child · parameter W');
 });
+
+test('updateBatch and hierarchyTarget resolve instantiated modules for caret, double-click and drag selections', () => {
+  const topText = '// header comment\nmodule top(input wire clk);\n  wire w;\n  uart_rx #(.B(115200)) u_rx(.clk(clk));\n  uart_tx u_tx(.clk(clk));\nendmodule\n';
+  const rxText = 'module uart_rx #(parameter B=9600)(input wire clk);\nendmodule\n';
+  const index = new HdlIndex();
+  index.updateBatch([['top.v', topText], ['uart_rx.v', rxText]]);
+  assert.deepEqual(index.modules().map(m => m.name), ['top', 'uart_rx']);
+
+  // Caret on module type 'uart_rx', instance name 'u_rx', or port '.clk' resolves instance 'u_rx'
+  const typeStart = topText.indexOf('uart_rx');
+  const instStart = topText.indexOf('u_rx');
+  const txStart = topText.indexOf('u_tx');
+  assert.equal(index.hierarchyTarget('top.v', typeStart).instName, 'u_rx');
+  assert.equal(index.hierarchyTarget('top.v', typeStart, typeStart + 'uart_rx'.length).instName, 'u_rx');
+  assert.equal(index.hierarchyTarget('top.v', instStart, instStart + 4).instName, 'u_rx');
+  assert.equal(index.hierarchyTarget('top.v', txStart).instName, 'u_tx');
+
+  // Caret on wire 'w' or header comment resolves enclosing/single module
+  const modTarget = index.hierarchyTarget('top.v', topText.indexOf('wire w'));
+  assert.equal(modTarget.kind, 'module');
+  assert.equal(modTarget.moduleName, 'top');
+  assert.equal(index.hierarchyTarget('uart_rx.v', 0).moduleName, 'uart_rx');
+});
