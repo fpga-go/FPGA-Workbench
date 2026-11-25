@@ -22,7 +22,7 @@ This does not run Vivado, elaborate a design, generate IP or determine compile o
 `;
 
 function parseArgs(args) {
-  const values = new Set(['--xpr', '--lpf', '--ldf', '--out', '--fileset', '--top']);
+  const values = new Set(['--xpr', '--lpf', '--ldf', '--prjx', '--out', '--fileset', '--top']);
   const switches = new Set(['--with-sim', '--force', '--help']);
   const parsed = {};
   const seen = new Set();
@@ -41,10 +41,10 @@ function parseArgs(args) {
     if (seen.size !== 1) throw new Error('--help 不能与导出参数同时使用。');
     return parsed;
   }
-  const projectFlags = [parsed.xpr, parsed.lpf, parsed.ldf].filter(Boolean);
+  const projectFlags = [parsed.xpr, parsed.lpf, parsed.ldf, parsed.prjx].filter(Boolean);
   if (projectFlags.length > 1) throw new Error('参数重复：不能同时指定多个工程文件参数。');
   parsed.xpr = projectFlags[0];
-  if (!parsed.xpr || !parsed.out) throw new Error('必须提供 --xpr <project.xpr>（或 --lpf / --ldf）和 --out <sources.f>。');
+  if (!parsed.xpr || !parsed.out) throw new Error('必须提供 --xpr <project.xpr>（或 --lpf / --ldf / --prjx）和 --out <sources.f>。');
   return parsed;
 }
 
@@ -76,7 +76,7 @@ async function realComparable(file) {
 }
 
 async function checkOutput(project, output, force) {
-  const inputs = [...new Set([project.path, project.ldfPath, project.lpfPath,
+  const inputs = [...new Set([project.path, project.ldfPath, project.lpfPath, project.prjxPath, project.pdcPath,
     ...project.files.map(file => file.path),
     ...project.ipReferences.flatMap(reference => [reference.path, ...reference.artifactPaths]),
   ].filter(Boolean))];

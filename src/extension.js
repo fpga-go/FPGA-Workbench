@@ -103,9 +103,10 @@ class Workbench {
       const picked = await vscode.window.showOpenDialog({
         title:'选择 FPGA 工程文件',
         filters:{
-          'FPGA 工程 (.xpr, .lpf, .ldf, .f)':['xpr','lpf','ldf','f'],
+          'FPGA 工程 (.xpr, .lpf, .ldf, .prjx, .f)':['xpr','lpf','ldf','prjx','f'],
           'Vivado (Xilinx) 工程 (.xpr)':['xpr'],
           'Diamond (Lattice) 工程 (.lpf, .ldf)':['lpf','ldf'],
+          'Libero (Microsemi) 工程 (.prjx)':['prjx'],
           'All Files (按 Filelist 解析)':['*']
         },
         canSelectMany:false
@@ -287,6 +288,8 @@ class Workbench {
       this.project.path,
       this.project.ldfPath,
       this.project.lpfPath,
+      this.project.prjxPath,
+      this.project.pdcPath,
       ...(this.project.ipReferences || []).map(ip=>ip.path).filter(Boolean)
     ].filter(Boolean);
     const configKeys = new Set(configPaths.map(key));
@@ -838,7 +841,7 @@ class Workbench {
     const uri=await vscode.window.showSaveDialog({title:'导出工程源文件清单',defaultUri:vscode.Uri.file(path.join(this.project.root,`${this.project.name}-sources.f`)),filters:{Filelist:['f']}});
     if(!uri || !this.isCurrent(revision))return;
     const ipInputs=(this.project.ipReferences || []).flatMap(ip=>[ip.path,...(ip.artifactPaths || [])]).filter(Boolean);
-    const extraInputs=[this.project.ldfPath,this.project.lpfPath].filter(Boolean);
+    const extraInputs=[this.project.ldfPath,this.project.lpfPath,this.project.prjxPath,this.project.pdcPath].filter(Boolean);
     const protectedKeys=new Set([this.project.path,...extraInputs,...this.project.files.map(f=>f.path).filter(Boolean),...ipInputs].map(key));
     if(protectedKeys.has(key(uri.fsPath)))throw new Error('导出路径指向工程输入文件，请选择其他文件名。');
     await vscode.workspace.fs.writeFile(uri,Buffer.from(filelist(this.project,path.dirname(uri.fsPath),{outputPath:uri.fsPath,top:this.top || this.project.top}),'utf8'));
@@ -853,8 +856,10 @@ class Workbench {
   async info() {
     if(!this.project) return this.selectProject();
     const p=this.project;
-    this.output.appendLine(`\n工程：${p.name}\nXPR：${p.path}\n根目录：${p.root}\n器件：${p.part || '未知'}\nVivado：${p.vivadoVersion || '未知'}\n顶层：${this.top || p.top || '自动'}\n后端：${this.backend.status || (this.backend.running?'slang':'结构索引')}\n源文件：${p.sourceFiles.length}\ninclude：${p.includeDirs.join('; ')}\n宏定义：${p.defines.join('; ')}`);
+    const toolLabel = p.projectType === 'lattice' ? 'Diamond' : p.projectType === 'libero' ? 'Libero' : 'Vivado';
+    this.output.appendLine(`\n工程：${p.name}\n工程文件：${p.path}\n根目录：${p.root}\n器件：${p.part || '未知'}\n${toolLabel}：${p.vivadoVersion || '未知'}\n顶层：${this.top || p.top || '自动'}\n后端：${this.backend.status || (this.backend.running?'slang':'结构索引')}\n源文件：${p.sourceFiles.length}\ninclude：${p.includeDirs.join('; ')}\n宏定义：${p.defines.join('; ')}`);
     if(p.projectType==='lattice' && p.lpf)this.output.appendLine(`LPF 约束：${p.lpfPath || p.path}（LOCATE ${p.lpf.locates.length}，IOBUF ${p.lpf.iobufs.length}，FREQUENCY ${p.lpf.frequencies.length}）`);
+    if(p.projectType==='libero' && p.pdc)this.output.appendLine(`PDC 约束：${p.pdcPath}（IO ${p.pdc.ios.length}，Bank ${p.pdc.iobanks.length}）`);
     for(const f of vscode.workspace.workspaceFolders || [])this.output.appendLine(`工作区 ${f.name} → XPR：${slash(path.relative(f.uri.fsPath,p.path))}`);
     for(const w of p.warnings)this.output.appendLine(`提示：${w}`);
     const counts=this.backend.diagnosticsCounts;

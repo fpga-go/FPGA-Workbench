@@ -5,13 +5,14 @@
 已支持类型：
 - **Vivado (Xilinx)**：`.xpr`
 - **Diamond (Lattice)**：`.lpf` / `.ldf`
+- **Libero (Microsemi)**：`.prjx`
 - **Filelist / All Files**：`.f` / `*.*`（选择未知类型文件时按 Filelist 解析）
 
-在 VS Code 中打开现有 Vivado (Xilinx)、Diamond (Lattice) 或 Filelist 工程，浏览文件、查看模块层级，跳转 Verilog/SystemVerilog 定义。
+在 VS Code 中打开现有 Vivado、Diamond、Libero 或 Filelist 工程，浏览文件、查看模块层级，跳转 Verilog/SystemVerilog 定义。
 
 ## 选中工程，即可导航
 
-- **工程文件**：直接选择 `.xpr`、`.lpf`、`.ldf`、`.f` 或任意文件，插件自动识别类型。插件读取文件集、路径、顶层、include 目录、宏定义和 LPF 约束。IP 归入所属文件集，源文件按目录展开，导出 Filelist 附工程与 IP 注释。
+- **工程文件**：直接选择 `.xpr`、`.lpf`、`.ldf`、`.prjx`、`.f` 或任意文件，插件自动识别类型。插件读取文件集、路径、顶层、include 目录、宏定义及 LPF / PDC 约束。IP 归入所属文件集，源文件按目录展开，导出 Filelist 附工程与 IP 注释。
 - **模块层级**：展开实例关系，点击模块进入源码。在编辑器中选中模块实例时，左侧模块层级自动展开并深色高亮对应节点。
 - **长代码阅读**：使用 VS Code 原生 Sticky Scroll，将当前模块声明固定在编辑器顶部，单击标题返回声明行。
 - **缩略图标题**：输入 `fpga-mark` 插入中文标题。
@@ -44,7 +45,7 @@
 ## 三步开始
 
 1. 在 VS Code 中打开任意工作文件夹，点击左侧 **FPGA Workbench** 芯片图标。
-2. 点击 **选择工程** 并直接选中 `.xpr`、`.lpf`、`.ldf` 或 Filelist 文件。插件自动识别类型，工程可位于任意目录。
+2. 点击 **选择工程** 并直接选中 `.xpr`、`.lpf`、`.ldf`、`.prjx` 或 Filelist 文件。插件自动识别类型，工程可位于任意目录。
 3. 点击文件开始编辑：`Ctrl + 鼠标左键` 跳转模块，或展开信号的本模块引用及上一层同名端口列表；点击列表中的位置即可查看源码。
 
 同时安装其他 HDL 导航插件时，可使用右键菜单中带 **FPGA** 前缀的命令，只查询当前工程。

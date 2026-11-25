@@ -1158,7 +1158,7 @@ test('single-step adaptive project picker accepts .xpr, .lpf, .ldf and arbitrary
   h.openDialog = async options => { dialogOptions = options; return [h.vscode.Uri.file(chosenLpf)]; };
   await h.app.selectProject();
   const filterEntries = Object.entries(dialogOptions.filters);
-  assert.deepEqual(Array.from(filterEntries[0][1]), ['xpr', 'lpf', 'ldf', 'f']);
+  assert.deepEqual(Array.from(filterEntries[0][1]), ['xpr', 'lpf', 'ldf', 'prjx', 'f']);
   assert.ok(filterEntries.some(([, exts]) => Array.from(exts).includes('*')));
   assert.equal(h.app.project.path, chosenLpf);
   assert.equal(h.app.project.projectType, 'lattice');

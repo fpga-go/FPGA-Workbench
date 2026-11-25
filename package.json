@@ -2,7 +2,7 @@
   "name": "fpga-workbench",
   "displayName": "FPGA Workbench · 工程导航",
   "description": "任意目录打开文件夹，选中工程文件，剩下的交给我吧。",
-  "version": "0.2.35",
+  "version": "0.2.36",
   "publisher": "fpga-go",
   "icon": "media/fpga-go-marketplace.png",
   "galleryBanner": {
@@ -22,11 +22,14 @@
     "FPGA",
     "Vivado",
     "Lattice",
+    "Microsemi",
+    "Libero",
     "Verilog",
     "SystemVerilog",
     "XPR",
     "LPF",
-    "LDF"
+    "LDF",
+    "PRJX"
   ],
   "main": "./dist/extension.js",
   "activationEvents": [
@@ -34,7 +37,8 @@
     "onLanguage:systemverilog",
     "workspaceContains:**/*.xpr",
     "workspaceContains:**/*.lpf",
-    "workspaceContains:**/*.ldf"
+    "workspaceContains:**/*.ldf",
+    "workspaceContains:**/*.prjx"
   ],
   "capabilities": {
     "untrustedWorkspaces": {
@@ -202,7 +206,7 @@
     "viewsWelcome": [
       {
         "view": "fpgaWorkbench.files",
-        "contents": "任意目录打开文件夹，选中工程文件，剩下的交给我吧。\n支持 Vivado (.xpr) · Diamond (.lpf / .ldf) · Filelist (.f / 任意文件)\n[选择工程](command:fpgaWorkbench.selectProject)",
+        "contents": "任意目录打开文件夹，选中工程文件，剩下的交给我吧。\n支持 Vivado (.xpr) · Diamond (.lpf / .ldf) · Libero (.prjx) · Filelist\n[选择工程](command:fpgaWorkbench.selectProject)",
         "when": "!fpgaWorkbench.hasProject"
       }
     ],

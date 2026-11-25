@@ -8,6 +8,7 @@ const { HdlIndex } = require('./indexer');
 
 const HDL_EXTENSIONS = new Set(['.v', '.sv', '.vh', '.svh']);
 const LATTICE_IP_EXTENSIONS = new Set(['.ipx', '.sbx', '.lpc']);
+const LIBERO_IP_EXTENSIONS = new Set(['.cxf', '.sbx', '.cxz', '.ccz']);
 const LPF_KEYWORDS = new Set([
   'BLOCK', 'SYSCONFIG', 'LOCATE', 'IOBUF', 'FREQUENCY', 'MULTICYCLE', 'MAXDELAY',
   'INPUT_SETUP', 'CLOCK_TO_OUT', 'USE', 'UGROUP', 'PROHIBIT', 'DEFINE', 'COMMERCIAL',
@@ -106,8 +107,9 @@ async function isFile(file) {
 function inferredType(file) {
   return ({ '.v': 'Verilog', '.vh': 'Verilog Header', '.sv': 'SystemVerilog', '.svh': 'SystemVerilog Header',
     '.vhd': 'VHDL', '.vhdl': 'VHDL', '.xdc': 'XDC', '.lpf': 'LPF', '.sdc': 'SDC', '.prf': 'PRF',
+    '.pdc': 'PDC', '.fdc': 'FDC', '.ndc': 'NDC', '.gcf': 'GCF',
     '.xci': 'IP', '.xcix': 'IP Core Container', '.bd': 'Block Design',
-    '.ipx': 'IP', '.sbx': 'IP', '.lpc': 'IP' })[path.extname(file).toLowerCase()] || 'File';
+    '.ipx': 'IP', '.sbx': 'IP', '.lpc': 'IP', '.cxf': 'IP', '.cxz': 'IP', '.ccz': 'IP' })[path.extname(file).toLowerCase()] || 'File';
 }
 
 function parseLpfKeyValues(tokens) {
@@ -933,11 +935,596 @@ async function loadFilelistProject(filelistPath, options = {}) {
   };
 }
 
-/** Read a project without launching Vivado/Diamond or modifying any project file. */
+/** Read a project without launching Vivado/Diamond/Libero or modifying any project file. */
+function splitLiberoFileValue(rawValue) {
+  const text = String(rawValue || '').trim();
+  const comma = text.lastIndexOf(',');
+  if (comma > 0 && /^[A-Za-z0-9_]+$/.test(text.slice(comma + 1))) {
+    return { rawPath: text.slice(0, comma).trim(), fileKind: text.slice(comma + 1).toLowerCase() };
+  }
+  return { rawPath: text, fileKind: '' };
+}
+
+function parseQuotedCsv(line) {
+  const fields = [];
+  let i = 0;
+  while (i < line.length) {
+    while (i < line.length && /[\s,]/.test(line[i])) i++;
+    if (i >= line.length) break;
+    if (line[i] === '"') {
+      let val = '';
+      i++;
+      while (i < line.length) {
+        if (line[i] === '\\' && i + 1 < line.length && line[i + 1] === '"') { val += '"'; i += 2; continue; }
+        if (line[i] === '"') { i++; break; }
+        val += line[i++];
+      }
+      fields.push(val);
+    } else {
+      const start = i;
+      while (i < line.length && line[i] !== ',') i++;
+      fields.push(line.slice(start, i).trim());
+    }
+  }
+  return fields;
+}
+
+/** Parse a Microsemi / Microchip Libero Physical Design Constraints (.pdc) file. */
+function parsePdc(text) {
+  if (typeof text !== 'string' || /\0/.test(text)) throw new Error('PDC 包含不支持的空字符或二进制内容。');
+  const source = text.replace(/^\uFEFF/, '');
+  if (/^\s*</.test(source)) throw new Error('PDC 语法无效：检测到 XML 标签。');
+  let headerDie = '';
+  const dieMatch = source.match(/^\s*#\s*Family\s*:\s*[^,\r\n]+\s*,\s*Die\s*:\s*([^\s,\r\n]+)/im);
+  if (dieMatch) headerDie = dieMatch[1].trim();
+  const joined = source.replace(/\\\r?\n/g, ' ');
+  const ios = [];
+  const iobanks = [];
+  const ports = [];
+  for (const rawLine of joined.split(/\r?\n/)) {
+    const trimmed = rawLine.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const commentIdx = trimmed.indexOf(' #');
+    const clean = (commentIdx >= 0 ? trimmed.slice(0, commentIdx) : trimmed).trim();
+    if (!clean) continue;
+    let tokens;
+    try { tokens = listWords(clean); } catch { continue; }
+    if (!tokens.length) continue;
+    const cmd = tokens[0].toLowerCase();
+    if (cmd === 'set_io') {
+      const attributes = {};
+      let port = '';
+      let idx = 1;
+      if (tokens[idx] && !tokens[idx].startsWith('-')) port = tokens[idx++];
+      while (idx < tokens.length) {
+        const flag = tokens[idx];
+        if (flag.startsWith('-') && idx + 1 < tokens.length && !tokens[idx + 1].startsWith('-')) {
+          const flagName = flag.slice(1).toLowerCase();
+          attributes[flagName] = tokens[idx + 1];
+          idx += 2;
+        } else {
+          attributes[flag.replace(/^-/, '').toLowerCase()] = 'true';
+          idx++;
+        }
+      }
+      if (!port) port = attributes.port_name || attributes.portname || '';
+      const pin = attributes.pinname || attributes.pin_name || '';
+      const iostd = attributes.iostd || attributes.io_std || '';
+      if (port) {
+        ios.push({ port, pin, iostd, attributes, raw: clean });
+        ports.push(port.replace(/\[.*$/, ''));
+      }
+    } else if (cmd === 'set_iobank') {
+      const attributes = {};
+      let bank = '';
+      let idx = 1;
+      if (tokens[idx] && !tokens[idx].startsWith('-')) bank = tokens[idx++];
+      while (idx < tokens.length) {
+        const flag = tokens[idx];
+        if (flag.startsWith('-') && idx + 1 < tokens.length && !tokens[idx + 1].startsWith('-')) {
+          attributes[flag.slice(1).toLowerCase()] = tokens[idx + 1];
+          idx += 2;
+        } else idx++;
+      }
+      if (!bank) bank = attributes.bank_name || attributes.bankname || '';
+      if (bank) iobanks.push({ bank, vcci: attributes.vcci || '', attributes, raw: clean });
+    }
+  }
+  return { ios, iobanks, ports: [...new Set(ports.filter(Boolean))], headerDie };
+}
+
+/** Parse a Microsemi / Microchip Libero (.prjx) project file without running Libero. */
+function parsePrjx(text) {
+  if (typeof text !== 'string' || /\0/.test(text)) throw new Error('PRJX 包含不支持的空字符或二进制内容。');
+  const source = text.replace(/^\uFEFF/, '');
+  if (/^\s*</.test(source)) throw new Error('PRJX 语法无效：检测到 XML 标签。');
+  const keys = new Map();
+  const rootLists = [];
+  const stack = [];
+  let currentFile = null;
+  let sawDirective = false;
+  for (const rawLine of source.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#') || line.startsWith('//')) continue;
+    const keyMatch = !stack.length && line.match(/^KEY\s+([^\s"]+)\s+"((?:\\.|[^"])*)"$/);
+    if (keyMatch) {
+      sawDirective = true;
+      keys.set(keyMatch[1].toLowerCase(), keyMatch[2].replace(/\\"/g, '"'));
+      continue;
+    }
+    if (/^LIST(?:\s+|$)/.test(line)) {
+      sawDirective = true;
+      const header = line.slice(4).trim();
+      const node = { header, lines: [], files: [], children: [] };
+      if (stack.length) stack.at(-1).children.push(node);
+      else rootLists.push(node);
+      stack.push(node);
+      continue;
+    }
+    if (line === 'ENDLIST') {
+      if (!stack.length) throw new Error('PRJX 语法无效：存在多余的 ENDLIST。');
+      if (currentFile && stack.at(-1).header === 'FileManager') {
+        throw new Error('PRJX FileManager 中存在未闭合的 VALUE 条目（缺少 ENDFILE）。');
+      }
+      stack.pop();
+      continue;
+    }
+    if (!stack.length) continue;
+    const topList = stack.at(-1);
+    if (topList.header === 'FileManager') {
+      const valMatch = line.match(/^VALUE\s+"((?:\\.|[^"])*)"$/);
+      if (valMatch) {
+        if (currentFile) throw new Error('PRJX FileManager 中存在嵌套或未闭合的 VALUE 条目。');
+        const { rawPath, fileKind } = splitLiberoFileValue(valMatch[1].replace(/\\"/g, '"'));
+        currentFile = { rawValue: valMatch[1], rawPath, fileKind, props: new Map() };
+        continue;
+      }
+      if (line === 'ENDFILE') {
+        if (!currentFile) throw new Error('PRJX FileManager 中存在多余的 ENDFILE。');
+        topList.files.push(currentFile);
+        currentFile = null;
+        continue;
+      }
+      if (currentFile) {
+        const eqMatch = line.match(/^([A-Za-z0-9_]+)\s*=\s*"((?:\\.|[^"])*)"$/);
+        const spMatch = !eqMatch && line.match(/^([A-Za-z0-9_]+)\s+"((?:\\.|[^"])*)"$/);
+        const m = eqMatch || spMatch;
+        if (m) currentFile.props.set(m[1].toLowerCase(), m[2].replace(/\\"/g, '"'));
+        continue;
+      }
+    }
+    topList.lines.push(line);
+  }
+  if (stack.length) throw new Error(`PRJX 中存在未闭合的 LIST 块：${stack.at(-1).header}`);
+  if (!sawDirective || (!keys.has('libero') && !rootLists.some(item => item.header === 'FileManager' || item.header === 'REVISIONS'))) {
+    throw new Error('PRJX 语法无效：未检测到 Libero 工程结构。');
+  }
+  const revisions = [];
+  let curRev = '';
+  for (const revList of rootLists.filter(item => item.header === 'REVISIONS')) {
+    for (const line of revList.lines) {
+      const revMatch = line.match(/^VALUE\s*=\s*"([^"]+)"\s*,\s*NUM\s*=\s*(\d+)$/i);
+      if (revMatch) revisions.push({ name: revMatch[1].trim(), num: revMatch[2] });
+      const curMatch = line.match(/^CURREV\s*=\s*(\d+)$/i);
+      if (curMatch) curRev = curMatch[1];
+    }
+  }
+  const collectValues = listNode => {
+    const out = [];
+    const walk = node => {
+      for (const l of node.lines) {
+        const m = l.match(/^(?:VALUE|FILE)\s+"((?:\\.|[^"])*)"$/i);
+        if (m) out.push(m[1].replace(/\\"/g, '"'));
+      }
+      for (const child of node.children) walk(child);
+    };
+    if (listNode) walk(listNode);
+    return out;
+  };
+  const findRoot = name => rootLists.find(item => item.header === name);
+  const fileManager = findRoot('FileManager')?.files || [];
+  const stimulusValues = [
+    ...collectValues(findRoot('AssociatedStimulus')),
+    ...collectValues(findRoot('IncludeModuleForSimulation')),
+    ...collectValues(findRoot('ActiveTestBenchList')),
+  ];
+  const simOnlyValues = collectValues(findRoot('ExcludePackageForSynthesis'));
+  const synOnlyValues = collectValues(findRoot('ExcludePackageForSimulation'));
+  const subBlocks = [];
+  for (const child of findRoot('ModuleSubBlockList')?.children || []) {
+    const fields = parseQuotedCsv(child.header);
+    if (fields.length >= 2) {
+      subBlocks.push({
+        moduleSpec: fields[0],
+        rawPath: fields[1],
+        isCore: truth(fields[2]),
+        isTestbench: truth(fields[3]),
+      });
+    }
+  }
+  const newModuleFiles = collectValues(findRoot('NewModulesInfo'));
+  return { keys, revisions, curRev, fileManager, stimulusValues, simOnlyValues, synOnlyValues, subBlocks, newModuleFiles };
+}
+
+function resolveLiberoCandidatePaths(raw, prjxPath, recordedProjectLocation) {
+  if (typeof raw !== 'string' || !raw.trim()) throw new Error('PRJX 路径为空。');
+  if (/[\0\r\n]/.test(raw)) throw new Error(`PRJX 路径包含不支持的控制字符：${JSON.stringify(raw)}`);
+  const winProject = /^[a-z]:[\\/]/i.test(prjxPath) || /^\\\\/.test(prjxPath);
+  const api = winProject ? path.win32 : path;
+  const projectRoot = api.dirname(api.resolve(prjxPath));
+  const trimmed = raw.trim();
+  const projectToken = trimmed.match(/^<project>(?:[\\/](.*))?$/i);
+  if (projectToken) {
+    const suffix = (projectToken[1] || '').replace(/\\/g, '/');
+    return [api.resolve(projectRoot, suffix)];
+  }
+  const normalized = trimmed.replace(/\\/g, '/');
+  if (/^[a-z]:[^/]/i.test(normalized)) throw new Error(`不支持依赖当前盘目录的路径：${raw}`);
+  const isWinAbs = /^[a-z]:\//i.test(normalized) || normalized.startsWith('//');
+  const isPosixAbs = normalized.startsWith('/') && !normalized.startsWith('//');
+  if (!isWinAbs && !isPosixAbs) {
+    return [api.resolve(projectRoot, normalized)];
+  }
+  let rebased = null;
+  if (isWinAbs && recordedProjectLocation && (/^[a-z]:[\\/]/i.test(recordedProjectLocation) || /^\\\\/.test(recordedProjectLocation))) {
+    const oldRoot = path.win32.resolve(recordedProjectLocation.replace(/\\/g, '/'));
+    const targetWin = path.win32.resolve(normalized);
+    const rel = path.win32.relative(oldRoot, targetWin);
+    if (rel === '') rebased = projectRoot;
+    else if (!path.win32.isAbsolute(rel)) rebased = api.resolve(projectRoot, rel.replace(/\\/g, '/'));
+  } else if (isPosixAbs && recordedProjectLocation?.startsWith('/')) {
+    const oldRoot = path.posix.resolve(recordedProjectLocation);
+    const rel = path.posix.relative(oldRoot, path.posix.resolve(normalized));
+    if (rel === '') rebased = projectRoot;
+    else if (!path.posix.isAbsolute(rel)) rebased = api.resolve(projectRoot, rel);
+  }
+  const direct = isWinAbs ? (winProject ? path.win32.resolve(normalized) : null) : (!winProject ? path.resolve(normalized) : null);
+  const candidates = unique([rebased, direct].filter(Boolean));
+  if (!candidates.length) throw new Error(`当前平台无法访问绝对路径：${raw}`);
+  return candidates;
+}
+
+async function resolveLiberoPath(raw, prjxPath, recordedProjectLocation) {
+  const candidates = resolveLiberoCandidatePaths(raw, prjxPath, recordedProjectLocation);
+  if (candidates.length === 1) return candidates[0];
+  for (const candidate of candidates) {
+    if (await isFile(candidate)) return candidate;
+  }
+  return candidates[0];
+}
+
+async function candidateLiberoIpFiles(cxfPath) {
+  const dir = path.dirname(cxfPath);
+  const stem = path.basename(cxfPath, path.extname(cxfPath));
+  const stubs = [];
+  if (path.extname(cxfPath).toLowerCase() === '.cxf' && await isFile(cxfPath)) {
+    try {
+      const xml = await readSource(cxfPath, 'auto');
+      if (!/<!DOCTYPE\b|<!ENTITY\b/i.test(xml) && XMLValidator.validate(xml) === true) {
+        const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '', removeNSPrefix: true,
+          parseAttributeValue: false, parseTagValue: false, trimValues: false, processEntities: true });
+        const comp = parser.parse(xml).Component;
+        for (const fset of array(comp?.fileSets?.fileSet)) {
+          const fsetId = String(fset?.fileSetId || '').toUpperCase();
+          if (fsetId && !fsetId.includes('HDL')) continue;
+          for (const f of array(fset?.file)) {
+            const name = String(f?.name || '').trim();
+            const ftype = String(f?.fileType || '').toLowerCase();
+            if (!name) continue;
+            const ext = path.extname(name).toLowerCase();
+            if (HDL_EXTENSIONS.has(ext) || /verilog/i.test(ftype)) {
+              stubs.push(path.resolve(dir, name.replace(/\\/g, '/')));
+            }
+          }
+        }
+      }
+    } catch (_) {}
+  }
+  stubs.push(path.join(dir, `${stem}.v`), path.join(dir, `${stem}.sv`));
+  const netlist = path.join(dir, `${stem}_sim_netlist.v`);
+  return { stubs: unique(stubs), netlist };
+}
+
+async function readSynplifyOptions(synPrjPaths, prjxPath, recordedProjectLocation) {
+  const result = { part: '', top: '', includeDirs: [], defines: [] };
+  for (const synPath of synPrjPaths) {
+    if (!synPath || !await isFile(synPath)) continue;
+    let content = '';
+    try { content = await readSource(synPath, 'auto'); } catch { continue; }
+    for (const rawLine of content.split(/\r?\n/)) {
+      const line = rawLine.trim();
+      if (!line.startsWith('set_option') && !line.startsWith('hdl_param')) continue;
+      let words;
+      try { words = listWords(line); } catch { continue; }
+      if (words[0] === 'set_option') {
+        const opt = words[1];
+        const val = words[2] === '-set' ? words[3] : words[2];
+        if (opt === '-part' && val && !result.part) result.part = val;
+        else if (opt === '-top_module' && val && !result.top) result.top = val.replace(/::.*$/, '');
+        else if (opt === '-include_path' && val) {
+          for (const part of val.split(/[;]+/).map(s => s.trim()).filter(Boolean)) {
+            try { result.includeDirs.push(await resolveLiberoPath(part, prjxPath, recordedProjectLocation)); } catch (_) {}
+          }
+        } else if ((opt === '-hdl_define' || opt === '-vlog_define') && val) {
+          try { result.defines.push(...listWords(val)); } catch { result.defines.push(val); }
+        }
+      } else if (words[0] === 'hdl_param' && words[1] === '-set' && words[2]) {
+        result.defines.push(words[3] !== undefined ? `${words[2]}=${words[3]}` : words[2]);
+      }
+    }
+  }
+  return result;
+}
+
+function liberoFileType(rawPath, fileKind) {
+  const inferred = inferredType(rawPath);
+  if (inferred !== 'File') return inferred;
+  if (['actgen_cxf', 'sd_cxf', 'cxf', 'sbx', 'cxz', 'ccz'].includes(fileKind)) return 'IP';
+  if (fileKind === 'pdc' || fileKind === 'io_pdc' || fileKind === 'fp_pdc') return 'PDC';
+  if (fileKind === 'sdc') return 'SDC';
+  if (fileKind === 'fdc') return 'FDC';
+  if (fileKind === 'ndc') return 'NDC';
+  if (['hdl', 'tb_hdl', 'stimulus', 'sim_hdl'].includes(fileKind)) return 'Verilog';
+  return fileKind || 'File';
+}
+
+async function loadLiberoProject(prjxPath, options = {}) {
+  const projectRoot = path.dirname(prjxPath);
+  const projectName = path.basename(prjxPath, path.extname(prjxPath));
+  const content = await readSource(prjxPath, 'auto');
+  const parsed = parsePrjx(content);
+  const warnings = [];
+  const recordedLocation = parsed.keys.get('projectlocation') || '';
+  const liberoVersion = parsed.keys.get('libero') || parsed.keys.get('capture') || '';
+  const activeRootRaw = parsed.keys.get('activeroot') || '';
+  const activeRootTop = activeRootRaw ? activeRootRaw.split('::')[0].trim() : '';
+
+  const sets = parsed.revisions.length
+    ? parsed.revisions.map(rev => ({ name: rev.name, num: rev.num, type: 'DesignSrcs', top: activeRootTop }))
+    : [{ name: 'Impl1', num: '1', type: 'DesignSrcs', top: activeRootTop }];
+  if (new Set(sets.map(set => set.name)).size !== sets.length || sets.some(set => !set.name)) {
+    throw new Error('Libero 工程 Revision 名称为空或重复。');
+  }
+  const byName = new Map(sets.map(set => [set.name, set]));
+  const defaultRev = sets.find(set => set.num === parsed.curRev) || sets[0];
+  const main = options.fileset ? byName.get(options.fileset) : defaultRev;
+  if (!main) throw new Error(`找不到 fileset：${options.fileset}`);
+  const selected = new Set([main.name]);
+  const includeSimulation = Boolean(options.includeSimulation);
+
+  const resolveSetPaths = async rawList => {
+    const resolvedSet = new Set();
+    for (const rawItem of rawList) {
+      const { rawPath } = splitLiberoFileValue(rawItem);
+      if (!rawPath) continue;
+      try { resolvedSet.add(key(await resolveLiberoPath(rawPath, prjxPath, recordedLocation))); } catch (_) {}
+    }
+    return resolvedSet;
+  };
+  const stimulusSet = await resolveSetPaths(parsed.stimulusValues);
+  const simOnlySet = await resolveSetPaths(parsed.simOnlyValues);
+  const synOnlySet = await resolveSetPaths(parsed.synOnlyValues);
+  for (const sb of parsed.subBlocks) {
+    if (sb.isTestbench && sb.rawPath) {
+      try { stimulusSet.add(key(await resolveLiberoPath(sb.rawPath, prjxPath, recordedLocation))); } catch (_) {}
+    }
+  }
+
+  const designKinds = new Set([
+    'hdl', 'tb_hdl', 'stimulus', 'sim_hdl', 'verilog', 'vhdl', 'systemverilog',
+    'actgen_cxf', 'sd_cxf', 'cxf', 'sbx', 'cxz', 'ccz',
+    'pdc', 'io_pdc', 'fp_pdc', 'sdc', 'fdc', 'ndc', 'gcf',
+  ]);
+  const synPrjPaths = [];
+  const rawEntries = [];
+  for (const entry of parsed.fileManager) {
+    if (entry.fileKind === 'prj') {
+      try { synPrjPaths.push(await resolveLiberoPath(entry.rawPath, prjxPath, recordedLocation)); } catch (_) {}
+      continue;
+    }
+    const ext = path.extname(entry.rawPath).toLowerCase();
+    const relevant = entry.fileKind ? designKinds.has(entry.fileKind)
+      : (HDL_EXTENSIONS.has(ext) || ['.vhd', '.vhdl', '.pdc', '.sdc', '.fdc', '.ndc', '.gcf', '.cxf', '.sbx'].includes(ext));
+    if (!relevant) continue;
+    rawEntries.push(entry);
+  }
+  if (!rawEntries.length) {
+    const fallbackValues = [
+      ...parsed.newModuleFiles,
+      ...parsed.subBlocks.map(sb => `${sb.rawPath},${LIBERO_IP_EXTENSIONS.has(path.extname(sb.rawPath).toLowerCase()) ? 'actgen_cxf' : sb.isTestbench ? 'tb_hdl' : 'hdl'}`),
+    ];
+    const seenRaw = new Set();
+    for (const val of fallbackValues) {
+      const { rawPath, fileKind } = splitLiberoFileValue(val);
+      if (!rawPath || seenRaw.has(rawPath.toLowerCase())) continue;
+      seenRaw.add(rawPath.toLowerCase());
+      rawEntries.push({ rawPath, fileKind, props: new Map() });
+    }
+  }
+
+  const files = [];
+  const seenFileKeys = new Set();
+  for (const entry of rawEntries) {
+    let resolved = null;
+    try { resolved = await resolveLiberoPath(entry.rawPath, prjxPath, recordedLocation); }
+    catch (error) { warnings.push(`${main.name}：${error.message}`); }
+    if (resolved) {
+      const fKey = key(resolved);
+      if (seenFileKeys.has(fKey)) continue;
+      seenFileKeys.add(fKey);
+    }
+    const disabled = [entry.props.get('disabled'), entry.props.get('is_disabled'), entry.props.get('excluded')].filter(Boolean).some(truth);
+    const enabled = !disabled;
+    const relToRoot = resolved ? path.relative(projectRoot, resolved).replace(/\\/g, '/') : '';
+    const inStimulusDir = /^stimulus(\/|$)/i.test(relToRoot) || /^<project>[\\/]stimulus[\\/]/i.test(entry.rawPath);
+    const isSimOnly = ['tb_hdl', 'stimulus', 'sim_hdl'].includes(entry.fileKind)
+      || truth(entry.props.get('simulation_only'))
+      || inStimulusDir
+      || Boolean(resolved && (stimulusSet.has(key(resolved)) || simOnlySet.has(key(resolved))));
+    const isSynOnly = Boolean(resolved && synOnlySet.has(key(resolved)));
+    const usedIn = isSimOnly ? ['simulation'] : isSynOnly ? ['synthesis'] : ['synthesis', 'simulation'];
+    const sourcePurpose = includeSimulation || usedIn.includes('synthesis');
+
+    let parentOrigin;
+    const rawParent = entry.props.get('parent');
+    if (rawParent) {
+      try { parentOrigin = await resolveLiberoPath(rawParent, prjxPath, recordedLocation); } catch (_) {}
+    }
+    const isGeneratedStub = Boolean(parentOrigin && LIBERO_IP_EXTENSIONS.has(path.extname(parentOrigin).toLowerCase()) && HDL_EXTENSIONS.has(path.extname(entry.rawPath).toLowerCase()));
+    files.push({
+      path: resolved,
+      rawPath: entry.rawPath,
+      fileset: main.name,
+      type: isGeneratedStub ? 'Verilog IP Stub' : liberoFileType(entry.rawPath, entry.fileKind),
+      exists: false,
+      existence: 'unknown',
+      enabled,
+      usedIn,
+      library: 'work',
+      generated: isGeneratedStub,
+      ...(parentOrigin ? { origin: parentOrigin } : {}),
+      selected: selected.has(main.name) && sourcePurpose,
+    });
+  }
+
+  await Promise.all(files.map(async file => {
+    if (file.path) {
+      try { file.exists = await isFile(file.path); file.existence = file.exists ? 'exists' : 'missing'; }
+      catch (error) { warnings.push(`无法检查文件 ${file.path}：${error.message}`); }
+    }
+    if (file.path && !file.exists && file.enabled && file.selected) warnings.push(`工程文件不存在：${file.path}`);
+  }));
+
+  const isLiberoIp = file => LIBERO_IP_EXTENSIONS.has(path.extname(file.path || file.rawPath).toLowerCase());
+  if (options.includeIpStubs !== false) {
+    const seenIp = new Set();
+    const known = new Set(files.filter(file => file.path && file.enabled && file.selected).map(file => key(file.path)));
+    const coveredOrigins = new Set(files.filter(file => file.generated && file.origin && file.enabled && file.selected && file.exists).map(file => key(file.origin)));
+    for (const file of [...files]) {
+      if (!file.selected || !file.enabled || !file.exists || !isLiberoIp(file)) continue;
+      const ipKey = key(file.path);
+      if (seenIp.has(ipKey) || coveredOrigins.has(ipKey)) continue;
+      seenIp.add(ipKey);
+      const { stubs } = await candidateLiberoIpFiles(file.path);
+      for (const candidate of stubs) {
+        let exists = false;
+        try { exists = await isFile(candidate); } catch (error) { warnings.push(`无法检查 IP 声明：${error.message}`); }
+        if (!exists) continue;
+        if (!known.has(key(candidate))) {
+          files.push({ ...file, path: candidate, rawPath: candidate, type: 'Verilog IP Stub', exists: true, existence: 'exists', generated: true, origin: file.path });
+          known.add(key(candidate));
+        }
+        break;
+      }
+    }
+  }
+
+  const ipReferences = [];
+  const seenReferences = new Map();
+  for (const file of files) {
+    if (!file.selected || !file.enabled || !isLiberoIp(file)) continue;
+    const identity = file.path ? key(file.path) : `raw:${file.rawPath}`;
+    const previous = seenReferences.get(identity);
+    if (previous) {
+      previous.rawPaths = [...new Set([...previous.rawPaths, file.rawPath])];
+      previous.filesets = [...new Set([...previous.filesets, file.fileset])];
+      continue;
+    }
+    const reference = { path: file.path, rawPaths: [file.rawPath], filesets: [file.fileset],
+      existence: file.existence, netlistPath: null, netlistExistence: 'unknown', artifactPaths: [] };
+    if (file.path) {
+      const { stubs, netlist } = await candidateLiberoIpFiles(file.path);
+      const childStubs = files.filter(f => f.generated && f.origin && f.path && key(f.origin) === key(file.path)).map(f => f.path);
+      reference.netlistPath = netlist;
+      reference.artifactPaths = unique([...childStubs, ...stubs, netlist]);
+      try { reference.netlistExistence = await isFile(reference.netlistPath) ? 'exists' : 'missing'; }
+      catch (error) { warnings.push(`无法检查 IP 仿真网表候选路径 ${reference.netlistPath}：${error.message}`); }
+    }
+    seenReferences.set(identity, reference);
+    ipReferences.push(reference);
+  }
+
+  let activePdc = null;
+  let activePdcPath = null;
+  for (const file of files) {
+    if (!file.selected || !file.enabled || !file.exists || !file.path || path.extname(file.path).toLowerCase() !== '.pdc') continue;
+    try {
+      const pdcText = await readSource(file.path, 'auto');
+      const parsedPdc = parsePdc(pdcText);
+      file.pdc = parsedPdc;
+      if (!activePdc) { activePdc = parsedPdc; activePdcPath = file.path; }
+    } catch (error) {
+      warnings.push(`PDC ${path.basename(file.path)}：${error.message}`);
+    }
+  }
+
+  if (!synPrjPaths.length && activeRootTop) {
+    const candidateSyn = path.join(projectRoot, 'synthesis', `${activeRootTop}_syn.prj`);
+    if (await isFile(candidateSyn)) synPrjPaths.push(candidateSyn);
+  }
+  const synOpts = await readSynplifyOptions(synPrjPaths, prjxPath, recordedLocation);
+
+  const sourceFiles = unique(files.filter(file => file.enabled && file.selected && file.exists && HDL_EXTENSIONS.has(path.extname(file.path).toLowerCase())).map(file => file.path));
+  const includeDirs = [...synOpts.includeDirs];
+  const defines = [...synOpts.defines];
+  for (const dir of array(options.includeDirs)) {
+    if (!dir || !String(dir).trim()) continue;
+    try { includeDirs.push(resolveXprPath(String(dir).trim(), prjxPath)); }
+    catch (error) { warnings.push(error.message); }
+  }
+  for (const def of array(options.defines)) {
+    if (def && String(def).trim()) defines.push(String(def).trim());
+  }
+  for (const file of sourceFiles.filter(file => /\.(vh|svh)$/i.test(file))) includeDirs.push(path.dirname(file));
+
+  if (files.some(file => file.selected && file.enabled && isLiberoIp(file))) {
+    warnings.push('Libero IP/SmartGen 仅索引工程已列出的源码及精确匹配的现有生成模块；未启动 Libero 展开或生成输出。');
+  }
+
+  const family = parsed.keys.get('vendortechnology_family') || '';
+  const die = synOpts.part || activePdc?.headerDie || parsed.keys.get('vendortechnology_die') || '';
+  const pkg = parsed.keys.get('vendortechnology_package') || '';
+  const speed = parsed.keys.get('vendortechnology_speed') || '';
+  const part = [family, [die, pkg].filter(Boolean).join('-'), speed.replace(/^-/, '') ? speed : '']
+    .filter(Boolean)
+    .join(' ')
+    .replace(/\s+-/g, '-');
+
+  const top = activeRootTop || synOpts.top || await inferTopFromSources(
+    sourceFiles,
+    activePdc?.ports?.length ? { ports: activePdc.ports } : null,
+    projectName
+  );
+
+  return {
+    path: prjxPath,
+    root: projectRoot,
+    name: projectName,
+    part,
+    vivadoVersion: liberoVersion,
+    liberoVersion,
+    projectType: 'libero',
+    prjxPath,
+    pdcPath: activePdcPath,
+    pdc: activePdc,
+    top,
+    filesets: sets.map(({ name, type, top: setTop }) => ({ name, type, top: setTop || top, srcSets: [] })),
+    selectedFilesets: [...selected],
+    files,
+    sourceFiles,
+    ipReferences,
+    includeSimulation,
+    includeDirs: unique(includeDirs),
+    defines: [...new Set(defines)],
+    warnings: [...new Set(warnings)],
+  };
+}
+
 async function loadProject(xprPath, options = {}) {
   const projectPath = path.resolve(xprPath);
   const ext = path.extname(projectPath).toLowerCase();
   if (ext === '.lpf' || ext === '.ldf') return loadLatticeProject(projectPath, options);
+  if (ext === '.prjx') return loadLiberoProject(projectPath, options);
   if (ext !== '.xpr') return loadFilelistProject(projectPath, options);
   const xml = await fs.readFile(projectPath, 'utf8');
   if (/<!DOCTYPE\b|<!ENTITY\b/i.test(xml)) throw new Error('XPR 不支持 DTD 或自定义实体声明。');
@@ -1117,6 +1704,11 @@ function filelist(project, baseDirectory, options = {}) {
       `// Lattice LPF: ${slash(project.lpfPath)}`,
       ...(project.lpf ? [`// LPF constraints: locates ${project.lpf.locates.length}; iobufs ${project.lpf.iobufs.length}; frequencies ${project.lpf.frequencies.length}`] : []),
     ] : []),
+    ...(project.projectType === 'libero' ? [
+      `// Libero PRJX: ${slash(project.prjxPath || project.path)}`,
+      `// Libero PDC: ${slash(project.pdcPath)}`,
+      ...(project.pdc ? [`// PDC constraints: ios ${project.pdc.ios.length}; iobanks ${project.pdc.iobanks.length}`] : []),
+    ] : []),
     `// Part: ${comment(project.part)}`,
     `// XPR-recorded Vivado version: ${comment(project.vivadoVersion)} (not the installed tool version).`,
     `// Exported at (ISO 8601 with timezone): ${comment(options.exportedAt || new Date().toISOString())}`,
@@ -1141,4 +1733,4 @@ function filelist(project, baseDirectory, options = {}) {
   return `${lines.join('\n')}\n`;
 }
 
-module.exports = { loadProject, resolveXprPath, filelist, parseLpf };
+module.exports = { loadProject, resolveXprPath, resolveLiberoPath, filelist, parseLpf, parsePdc, parsePrjx };
